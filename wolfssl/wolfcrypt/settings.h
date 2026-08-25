@@ -3259,7 +3259,7 @@
     #endif
 #endif
 
-#if defined(__xtensa__)
+#if defined(__xtensa__) && !defined(WOLFSSL_XTENSA_FAST_UNSAFE)
     /* Compilers for Xtensa have been seen to compile C code into
      * non-constant time assembly code. The small implementation is not known
      * to have these issues. */
