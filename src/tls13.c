@@ -4082,6 +4082,48 @@ static int EchCalcAcceptance(WOLFSSL* ssl, byte* label, word16 labelSz,
 }
 #endif
 
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG) && \
+    (!defined(NO_WOLFSSL_CLIENT) || !defined(NO_WOLFSSL_SERVER))
+/* Record whether the peer's advertised algorithms permit SHA-1 signed
+ * certificates.
+ *
+ * RFC 8446 Section 4.2.3 has signature_algorithms cover certificate signatures
+ * when signature_algorithms_cert is absent.
+ *
+ * ssl         The SSL/TLS object.
+ * peerSuites  The peer's signature_algorithms list.
+ */
+static void SetPeerSha1CertOk(WOLFSSL* ssl, const Suites* peerSuites)
+{
+    const byte* list = NULL;
+    word16      listSz = 0;
+    word16      i;
+
+    ssl->options.peerSha1CertOk = 0;
+
+    if (ssl->certHashSigAlgoSz > 0) {
+        list = ssl->certHashSigAlgo;
+        listSz = ssl->certHashSigAlgoSz;
+    }
+    else if (peerSuites != NULL) {
+        list = peerSuites->hashSigAlgo;
+        listSz = peerSuites->hashSigAlgoSz;
+    }
+    else {
+        return;
+    }
+
+    for (i = 0; i + 2 <= listSz; i += 2) {
+        /* Only rsa_pkcs1_sha1, dsa_sha1 and ecdsa_sha1 carry sha_mac as the
+         * first byte of the signature scheme. */
+        if (list[i] == sha_mac) {
+            ssl->options.peerSha1CertOk = 1;
+            break;
+        }
+    }
+}
+#endif /* !NO_CERTS && !WOLFSSL_NO_SIGALG && (client || server) */
+
 #ifndef NO_WOLFSSL_CLIENT
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
 #if defined(OPENSSL_EXTRA) && !defined(WOLFSSL_PSK_ONE_ID) && \
@@ -6190,6 +6232,11 @@ static int DoTls13CertificateRequest(WOLFSSL* ssl, const byte* input,
     WOLFSSL_ENTER("DoTls13CertificateRequest");
 
     XMEMSET(&peerSuites, 0, sizeof(Suites));
+#if !defined(WOLFSSL_NO_SIGALG)
+    /* Post-handshake auth can deliver several requests; each one's cert
+     * signature algorithms replace the last rather than adding to them. */
+    ssl->certHashSigAlgoSz = 0;
+#endif
 
 #ifdef WOLFSSL_CALLBACKS
     if (ssl->hsInfoOn) AddPacketName(ssl, "CertificateRequest");
@@ -6277,6 +6324,11 @@ static int DoTls13CertificateRequest(WOLFSSL* ssl, const byte* input,
         WOLFSSL_ERROR_VERBOSE(INVALID_PARAMETER);
         return INVALID_PARAMETER;
     }
+
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+    SetPeerSha1CertOk(ssl, &peerSuites);
+#endif
+
 #ifdef WOLFSSL_CERT_SETUP_CB
     if ((ret = CertSetupCbWrapper(ssl)) != 0)
         return ret;
@@ -6513,6 +6565,10 @@ static int DoPreSharedKeys(WOLFSSL* ssl, const byte* input, word32 inputSz,
     wc_MemZero_Add("DoPreSharedKeys binderKey", binderKey, sizeof(binderKey));
 #endif
 
+#if defined(HAVE_SESSION_TICKET) && defined(WOLFSSL_EARLY_DATA)
+    ssl->options.ticketPredatesCtx = 0;
+#endif
+
     ext = TLSX_Find(ssl->extensions, TLSX_PRE_SHARED_KEY);
     if (ext == NULL) {
         WOLFSSL_MSG("No pre shared extension keys found");
@@ -6641,6 +6697,42 @@ static int DoPreSharedKeys(WOLFSSL* ssl, const byte* input, word32 inputSz,
 
         #ifdef WOLFSSL_EARLY_DATA
             ssl->options.maxEarlyDataSz = ssl->session->maxEarlyDataSz;
+            /* RFC 8446 Section 8.2: fresh servers should reject 0-RTT.
+             * Flag tickets minted before this ctx was created. */
+            if (!ssl->ctx->noFreshStartCheck) {
+        #ifdef WOLFSSL_32BIT_MILLI_TIME
+                /* A 32 bit ms clock wraps every ~49.7 days, so the ctx age is
+                 * only exact while it stays below the max ticket age. Past
+                 * that point DoClientTicketCheck has already rejected
+                 * anything old enough to predate the ctx, so the check can be
+                 * skipped.
+                 *
+                 * ctxAge is unsigned, so a clock reading before the ctx start
+                 * time (a backward step) wraps to just under 2^32. Letting
+                 * that count as an old ctx would silently disable the check
+                 * and admit 0-RTT for tickets minted before a restart, so the
+                 * near-wrap band stays in the checked range.
+                 *
+                 * The two cases are indistinguishable on a wrapping 32 bit
+                 * clock, so a ctx aged between (2^32 - max ticket age) and
+                 * 2^32 ms also lands in the band and refuses 0-RTT until it
+                 * wraps out. Refusing 0-RTT only costs the early data round
+                 * trip, so the ambiguity is resolved that way. */
+                word32 maxAge = (word32)TLS13_MAX_TICKET_AGE * 1000;
+                word32 now = TimeNowInMilliseconds();
+                word32 ctxAge = now - ssl->ctx->ticketStartTime;
+                word32 delta = ssl->ctx->ticketStartTime -
+                               ssl->session->ticketSeen;
+                ssl->options.ticketPredatesCtx =
+                    (now != 0 &&
+                     (ctxAge <= maxAge || ctxAge >= (word32)0u - maxAge) &&
+                     delta != 0 &&
+                     delta <= maxAge);
+        #else
+                ssl->options.ticketPredatesCtx =
+                    (ssl->session->ticketSeen < ssl->ctx->ticketStartTime);
+        #endif
+            }
         #endif
             /* Use the same cipher suite as before and set up for use. */
             ssl->options.cipherSuite0   = ssl->session->cipherSuite0;
@@ -6906,6 +6998,12 @@ static int CheckPreSharedKeys(WOLFSSL* ssl, const byte* input, word32 helloSz,
              * cert_with_extern_psk, so skip key derivation in that case. */
             if (ssl->earlyData != no_early_data && first
                 && ssl->options.maxEarlyDataSz > 0
+    #ifdef HAVE_SESSION_TICKET
+                /* RFC 8446 section 8.2: freshly started servers should
+                 * reject 0-RTT. Tickets minted before this ctx was created
+                 * belong to a previous instance. */
+                && !ssl->options.ticketPredatesCtx
+    #endif
     #ifdef WOLFSSL_CERT_WITH_EXTERN_PSK
                 && !hasCertWithExternPsk
     #endif
@@ -7804,6 +7902,11 @@ int DoTls13ClientHello(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
     XMEMCPY(ssl->clSuites->suites, input + args->idx, ssl->clSuites->suiteSz);
     args->idx += ssl->clSuites->suiteSz;
     ssl->clSuites->hashSigAlgoSz = 0;
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+    /* Discard any list kept from a previous ClientHello on this object; a
+     * second hello that drops signature_algorithms_cert must not inherit it. */
+    ssl->certHashSigAlgoSz = 0;
+#endif
 
     /* Compression */
     b = input[args->idx++];
@@ -7842,7 +7945,7 @@ int DoTls13ClientHello(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
         if (echX == NULL)
             ERROR_OUT(WOLFSSL_FATAL_ERROR, exit_dch);
 
-        ((WOLFSSL_ECH*)echX->data)->aad = input + HANDSHAKE_HEADER_SZ;
+        ((WOLFSSL_ECH*)echX->data)->aad = input + args->begin;
         ((WOLFSSL_ECH*)echX->data)->aadLen = helloSz;
     }
 #endif
@@ -7852,6 +7955,10 @@ int DoTls13ClientHello(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
                                                             ssl->clSuites))) {
         goto exit_dch;
     }
+
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+    SetPeerSha1CertOk(ssl, ssl->clSuites);
+#endif
 
 #if (defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)) && \
     defined(HAVE_TLS_EXTENSIONS)
@@ -9869,6 +9976,192 @@ static int SetupOcspResp(WOLFSSL* ssl)
 }
 #endif
 
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+/* Certificate is signed with the deprecated SHA-1 hash. An unrecognized or
+ * unparsable algorithm is not SHA-1; the peer still verifies the chain.
+ *
+ * der    Buffer holding the DER encoded certificate.
+ * derSz  Length of the DER encoded certificate.
+ * returns 1 when SHA-1 signed, 0 otherwise.
+ */
+static int IsSha1SignedCert(const byte* der, word32 derSz)
+{
+    word32 idx = 0;
+    word32 oid = 0;
+    word32 algoIdEnd = 0;
+    int    len = 0;
+    int    isSha1 = 0;
+    int    ret;
+#if defined(WC_RSA_PSS) && !defined(NO_RSA)
+    enum wc_HashType hash = WC_HASH_TYPE_NONE;
+    int    mgf = 0;
+    int    saltLen = 0;
+#endif
+
+    /* Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, ... }.
+     * GetSequence() checks each length against the maximum index passed in, so
+     * idx and idx + len stay inside the buffer. */
+    ret = GetSequence(der, &idx, &len, derSz);
+    if (ret >= 0)
+        ret = GetSequence(der, &idx, &len, derSz);
+    if (ret >= 0) {
+        /* signatureAlgorithm immediately follows the tbsCertificate. Decode
+         * the AlgorithmIdentifier here rather than with GetAlgoId() so the
+         * RSASSA-PSS parameters, which hold the digest, stay reachable. */
+        idx += (word32)len;
+        ret = GetSequence(der, &idx, &len, derSz);
+    }
+    if (ret >= 0) {
+        algoIdEnd = idx + (word32)len;
+        ret = GetObjectId(der, &idx, &oid, oidSigType, algoIdEnd);
+    }
+    if (ret >= 0) {
+        if ((oid == CTC_SHAwRSA) || (oid == CTC_SHAwECDSA) ||
+                (oid == CTC_SHAwDSA)) {
+            isSha1 = 1;
+        }
+    #if defined(WC_RSA_PSS) && !defined(NO_RSA)
+        /* RSASSA-PSS uses one signature OID for every digest and names the
+         * digest in the algorithm parameters instead. Absent parameters are
+         * passed through as a zero length buffer rather than skipped: RFC 4055
+         * makes them mean all defaults, which is SHA-1, and
+         * wc_DecodeRsaPssParams() reports that. */
+        else if ((oid == RSAPSSk) && (idx <= algoIdEnd) &&
+                (wc_DecodeRsaPssParams(der + idx, algoIdEnd - idx, &hash, &mgf,
+                                       &saltLen) == 0)) {
+            isSha1 = (hash == WC_HASH_TYPE_SHA);
+        }
+    #endif
+    }
+
+    return isSha1;
+}
+
+/* Certificate is self signed. RFC 8446 Section 4.4.2.2: "Certificates that are
+ * self-signed or certificates that are expected to be trust anchors are not
+ * validated as part of the chain and therefore MAY be signed with any
+ * algorithm."
+ *
+ * DecodedCert.selfSigned is an issuer/subject name hash compare rather than a
+ * verified self-signature, which is enough here: the chain is the one this end
+ * was configured with, not one an attacker supplies.
+ *
+ * The certificate is parsed as CA_TYPE rather than CERT_TYPE so a trust anchor
+ * carrying serial number 0 still decodes. ParseCertRelative() rejects a zero
+ * serial for CERT_TYPE, and legacy roots, the certificates most likely to be
+ * SHA-1 signed, are the ones that use it. With NO_VERIFY and no certificate
+ * manager the serial exemption is all the type changes, and that exemption
+ * still requires a self signed CA, so a leaf carrying serial 0 is reported as
+ * not self signed and stays subject to the SHA-1 rule.
+ *
+ * ssl           The SSL/TLS object.
+ * der           Buffer holding the DER encoded certificate.
+ * derSz         Length of the DER encoded certificate.
+ * isSelfSigned  On success, 1 when self signed, 0 otherwise. A certificate
+ *               that will not parse is reported as not self signed so the
+ *               SHA-1 rule still applies to it.
+ * returns 0 on success, MEMORY_E when the decoder cannot be allocated.
+ */
+static int IsSelfSignedCert(WOLFSSL* ssl, const byte* der, word32 derSz,
+                            int* isSelfSigned)
+{
+    DecodedCert* cert;
+
+    *isSelfSigned = 0;
+
+    cert = (DecodedCert*)XMALLOC(sizeof(DecodedCert), ssl->heap,
+                                 DYNAMIC_TYPE_DCERT);
+    if (cert == NULL)
+        return MEMORY_E;
+
+    InitDecodedCert(cert, der, derSz, ssl->heap);
+    if (ParseCertRelative(cert, CA_TYPE, NO_VERIFY, NULL, NULL) == 0)
+        *isSelfSigned = (cert->selfSigned != 0);
+    else
+        WOLFSSL_MSG("Cannot decode certificate, not treating as self signed");
+    FreeDecodedCert(cert);
+    XFREE(cert, ssl->heap, DYNAMIC_TYPE_DCERT);
+
+    return 0;
+}
+
+/* Check the chain about to be sent against what the peer advertised.
+ *
+ * RFC 8446 Section 4.4.2.2 permits a fallback chain the peer did not advertise
+ * support for, but the chain "MUST NOT" use SHA-1 unless the peer's
+ * advertisement permits it. Section 4.4.2.3 requires client certificates to be
+ * signed with an acceptable algorithm "as described in Section 4.4.2.2", so the
+ * same rule covers both sides. How a failure is resolved differs by side and is
+ * left to the caller.
+ *
+ * ssl  The SSL/TLS object.
+ * returns 0 when the chain may be sent, MATCH_SUITE_ERROR when it may not and
+ * MEMORY_E when a certificate could not be examined.
+ */
+static int CheckCertChainSigAlgo(WOLFSSL* ssl)
+{
+    byte*  chain;
+    byte*  cur;
+    word32 chainSz;
+    word32 len;
+    word32 idx = 0;
+    int    selfSigned = 0;
+    int    ret = 0;
+
+    if (ssl->options.peerSha1CertOk)
+        return 0;
+
+    if (ssl->buffers.certificate == NULL ||
+            ssl->buffers.certificate->buffer == NULL) {
+        return 0;
+    }
+
+    if (IsSha1SignedCert(ssl->buffers.certificate->buffer,
+                         ssl->buffers.certificate->length)) {
+        ret = IsSelfSignedCert(ssl, ssl->buffers.certificate->buffer,
+                               ssl->buffers.certificate->length, &selfSigned);
+        if (ret != 0)
+            return ret;
+        if (!selfSigned)
+            ret = MATCH_SUITE_ERROR;
+    }
+
+    if (ret == 0 && ssl->buffers.certChain != NULL &&
+            ssl->buffers.certChain->buffer != NULL &&
+            ssl->buffers.certChainCnt > 0) {
+        chain = ssl->buffers.certChain->buffer;
+        chainSz = ssl->buffers.certChain->length;
+
+        while (ret == 0) {
+            cur = chain + idx;
+            /* NextCert() length includes the CERT_HEADER_SZ byte prefix and
+             * is 0 at the end of the list. Keep this terminator matching the
+             * send loop so both walk the same certificates. */
+            len = NextCert(chain, chainSz, &idx);
+            if (len == 0)
+                break;
+            if (len <= CERT_HEADER_SZ)
+                continue;
+            cur += CERT_HEADER_SZ;
+            len -= CERT_HEADER_SZ;
+
+            if (IsSha1SignedCert(cur, len)) {
+                ret = IsSelfSignedCert(ssl, cur, len, &selfSigned);
+                if (ret != 0)
+                    return ret;
+                if (!selfSigned)
+                    ret = MATCH_SUITE_ERROR;
+            }
+        }
+    }
+
+    if (ret == WC_NO_ERR_TRACE(MATCH_SUITE_ERROR))
+        WOLFSSL_MSG("Chain is SHA-1 signed but peer did not advertise SHA-1");
+
+    return ret;
+}
+#endif /* !NO_CERTS && !WOLFSSL_NO_SIGALG */
+
 /* handle generation TLS v1.3 certificate (11) */
 /* Send the certificate for this end and any CAs that help with validation.
  * This message is always encrypted in TLS v1.3.
@@ -9893,6 +10186,9 @@ static int SendTls13Certificate(WOLFSSL* ssl)
     sword32 length;
 #ifdef WOLFSSL_POST_HANDSHAKE_AUTH
     byte*  certReqCtx = NULL;
+#endif
+#ifndef WOLFSSL_NO_SIGALG
+    int    chainRet;
 #endif
 
 #ifdef OPENSSL_EXTRA
@@ -9927,6 +10223,43 @@ static int SendTls13Certificate(WOLFSSL* ssl)
             wolfSSL_X509_free(x509);
             x509 = NULL;
             wolfSSL_EVP_PKEY_free(pkey);
+        }
+    }
+#endif
+
+#ifndef WOLFSSL_NO_SIGALG
+    /* Run before the blank certificate branch below so a client with nothing
+     * acceptable can fall into it. Only on first entry: fragOffset is reset to
+     * 0 before this message is built and is non-zero only while resuming a
+     * fragmented send, whose chain was checked on the first pass. The result is
+     * kept out of ret so a pending value there is left alone. */
+    if (ssl->options.sendVerify != SEND_BLANK_CERT && ssl->fragOffset == 0) {
+        chainRet = CheckCertChainSigAlgo(ssl);
+        if ((chainRet != 0) &&
+                (chainRet != WC_NO_ERR_TRACE(MATCH_SUITE_ERROR))) {
+            return chainRet;
+        }
+        if (chainRet == WC_NO_ERR_TRACE(MATCH_SUITE_ERROR)) {
+            if (ssl->options.side == WOLFSSL_SERVER_END) {
+                SendAlert(ssl, alert_fatal, handshake_failure);
+                WOLFSSL_ERROR_VERBOSE(MATCH_SUITE_ERROR);
+                return MATCH_SUITE_ERROR;
+            }
+        #ifndef WOLFSSL_NO_CLIENT_CERT_ERROR
+            /* RFC 8446 Section 4.4.2: a client with no acceptable certificate
+             * sends an empty certificate_list rather than failing. */
+            WOLFSSL_MSG("Client chain not acceptable, sending blank cert");
+            ssl->options.sendVerify = SEND_BLANK_CERT;
+        #else
+            /* RFC 8446 Section 4.4.2.2: an endpoint that cannot produce an
+             * acceptable chain aborts with a certificate related alert,
+             * unsupported_certificate by default. */
+            WOLFSSL_MSG("Client chain not acceptable and blank cert not "
+                        "allowed");
+            SendAlert(ssl, alert_fatal, unsupported_certificate);
+            WOLFSSL_ERROR_VERBOSE(NO_CERT_ERROR);
+            return NO_CERT_ERROR;
+        #endif
         }
     }
 #endif
@@ -10494,6 +10827,8 @@ static int SendTls13CertificateVerify(WOLFSSL* ssl)
                     /* Swap keys */
                     ssl->buffers.key     = ssl->buffers.altKey;
                     ssl->buffers.weOwnKey = ssl->buffers.weOwnAltKey;
+                    /* buffers.key is the only owner of the alt key now. */
+                    ssl->buffers.weOwnAltKey = 0;
 
                 #ifdef WOLFSSL_BLIND_PRIVATE_KEY
                     ssl->buffers.keyMask = ssl->buffers.altKeyMask;
@@ -12981,6 +13316,12 @@ static int SendTls13Finished(WOLFSSL* ssl)
 #endif /* WOLFSSL_DTLS13 */
 
     outputSz = WC_MAX_DIGEST_SIZE + DTLS_HANDSHAKE_HEADER_SZ + MAX_MSG_EXTRA;
+#ifdef WOLFSSL_DTLS13
+    /* MAX_MSG_EXTRA only budgets RECORD_HEADER_SZ. The DTLS 1.3 unified header
+     * is longer and grows with the TX CID. */
+    if (isDtls)
+        outputSz += Dtls13GetRlHeaderLength(ssl, 1);
+#endif /* WOLFSSL_DTLS13 */
     /* Check buffers are big enough and grow if needed. */
     if ((ret = CheckAvailableSize(ssl, outputSz)) != 0)
         return ret;
@@ -13204,6 +13545,23 @@ static int SendTls13Finished(WOLFSSL* ssl)
 }
 #endif /* !NO_WOLFSSL_CLIENT || !NO_WOLFSSL_SERVER */
 
+/* RFC 9846 Section 4.7.3: a TLS 1.3 sender MUST NOT allow its number of key
+ * updates to exceed 2^48-1. DTLS 1.3 bounds the epoch instead (RFC 9147
+ * Section 4.2.1), so this only covers TLS.
+ *
+ * ssl  The SSL/TLS object.
+ * returns 1 when a further KeyUpdate would exceed the limit, 0 otherwise.
+ */
+int Tls13KeyUpdateLimitReached(WOLFSSL* ssl)
+{
+    if (ssl->options.dtls)
+        return 0;
+
+    return w64GTE(ssl->keys.keyUpdateCount,
+                  w64From32(TLS13_KEY_UPDATE_MAX_HI32,
+                            TLS13_KEY_UPDATE_MAX_LO32));
+}
+
 /* handle generation TLS v1.3 key_update (24) */
 /* Send the TLS v1.3 KeyUpdate message.
  *
@@ -13235,20 +13593,17 @@ int SendTls13KeyUpdate(WOLFSSL* ssl)
     }
 #endif /* WOLFSSL_DTLS13 */
 
-    if (!ssl->options.dtls) {
-        /* RFC 9846 Section 4.7.3: a sending implementation MUST NOT allow its
-         * number of key updates to exceed 2^48-1. Receivers MUST NOT enforce
-         * this on the peer. */
-        if (w64GTE(ssl->keys.keyUpdateCount,
-                   w64From32(TLS13_KEY_UPDATE_MAX_HI32,
-                             TLS13_KEY_UPDATE_MAX_LO32))) {
-            WOLFSSL_MSG("TLS 1.3 key update count at maximum; refusing "
-                        "KeyUpdate");
-            return BAD_STATE_E;
-        }
+    /* RFC 9846 Section 4.7.3: a sending implementation MUST NOT allow its
+     * number of key updates to exceed 2^48-1. Receivers MUST NOT enforce this
+     * on the peer. */
+    if (Tls13KeyUpdateLimitReached(ssl)) {
+        WOLFSSL_MSG("TLS 1.3 key update count at maximum; refusing KeyUpdate");
+        return BAD_STATE_E;
     }
 
-    outputSz = OPAQUE8_LEN + MAX_MSG_EXTRA;
+    /* i already carries the real record and handshake header lengths.
+     * MAX_MSG_EXTRA only budgets RECORD_HEADER_SZ. */
+    outputSz = (int)i + OPAQUE8_LEN + MAX_MSG_EXTRA;
     /* Check buffers are big enough and grow if needed. */
     if ((ret = CheckAvailableSize(ssl, outputSz)) != 0)
         return ret;
@@ -13416,7 +13771,12 @@ static int DoTls13KeyUpdate(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
 #endif /* WOLFSSL_DTLS13 */
 
 #if defined(HAVE_WRITE_DUP) && defined(WOLFSSL_TLS13)
-        /* Read side cannot write; delegate the response to the write side. */
+        /* Read side cannot write; delegate the response to the write side.
+         * The key update cap is deliberately not checked here: the two sides
+         * are separate WOLFSSL objects with separate keys, and only the write
+         * side ever sends a KeyUpdate, so this object's keyUpdateCount is not
+         * the one the limit applies to. The check is applied on the write side
+         * in wolfssl_write_dup_do_tls13_work(). */
         if (ssl->dupWrite != NULL && ssl->dupSide == READ_DUP_SIDE) {
             if (wc_LockMutex(&ssl->dupWrite->dupMutex) != 0)
                 return BAD_MUTEX_E;
@@ -13426,6 +13786,17 @@ static int DoTls13KeyUpdate(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
             return 0;
         }
 #endif /* HAVE_WRITE_DUP && WOLFSSL_TLS13 */
+
+        /* RFC 9846 Section 4.7.3: a sender that would exceed the key update
+         * limit "MUST NOT send its own KeyUpdate ... and SHOULD instead ignore
+         * the 'update_requested' flag". Dropping the response rather than
+         * failing keeps the connection alive on the current keys until the
+         * Section 5.5 data limits eventually force it closed. */
+        if (Tls13KeyUpdateLimitReached(ssl)) {
+            WOLFSSL_MSG("Key update limit reached; ignoring update_requested");
+            ssl->keys.keyUpdateRespond = 0;
+            return 0;
+        }
 
 #ifndef WOLFSSL_RW_THREADED
         return SendTls13KeyUpdate(ssl);
@@ -14682,6 +15053,11 @@ int DoTls13HandShakeMsgType(WOLFSSL* ssl, byte* input, word32* inOutIdx,
                 *inOutIdx = echInOutIdx;
                 /* call again with the inner hello */
                 if (ret == 0) {
+                    echInOutIdx = HANDSHAKE_HEADER_SZ;
+#ifdef WOLFSSL_DTLS13
+                    if (ssl->options.dtls)
+                        echInOutIdx = DTLS13_HANDSHAKE_HEADER_SZ;
+#endif
                     ssl->options.echProcessingInner = 1;
                     ret = DoTls13ClientHello(ssl,
                         ((WOLFSSL_ECH*)echX->data)->innerClientHello,
@@ -14958,6 +15334,12 @@ int DoTls13HandShakeMsgType(WOLFSSL* ssl, byte* input, word32* inOutIdx,
                             ssl->options.sigAlgo;
                         ssl->dupWrite->postHandshakeHashAlgo =
                             ssl->options.hashAlgo;
+                    #if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+                        /* The request just parsed decides whether the chain
+                         * about to be sent may be SHA-1 signed. */
+                        ssl->dupWrite->postHandshakeSha1CertOk =
+                            (byte)ssl->options.peerSha1CertOk;
+                    #endif
                         ssl->dupWrite->postHandshakeAuthPending = 1;
                     }
                     wc_UnLockMutex(&ssl->dupWrite->dupMutex);
@@ -17004,6 +17386,32 @@ int wolfSSL_CTX_set_max_early_data(WOLFSSL_CTX* ctx, unsigned int sz)
 #else
     return 0;
 #endif
+}
+
+/* Disable the RFC 8446 Section 8.2 fresh start protection. Early data is
+ * then accepted for tickets minted before this ctx was created. Only use
+ * this when the anti-replay state reliably survives server restarts.
+ *
+ * The check needs TimeNowInMilliseconds() to be comparable across restarts.
+ * On ports where it counts from boot the check never fires for tickets
+ * minted before a reboot.
+ *
+ * ctx  The SSL/TLS CTX object.
+ * returns BAD_FUNC_ARG when ctx is NULL or not TLS v1.3, SIDE_ERROR when
+ * called with a client and 0 on success.
+ */
+int wolfSSL_CTX_no_early_data_fresh_start_check(WOLFSSL_CTX* ctx)
+{
+    if (ctx == NULL || !IsAtLeastTLSv1_3(ctx->method->version))
+        return BAD_FUNC_ARG;
+    if (ctx->method->side == WOLFSSL_CLIENT_END)
+        return SIDE_ERROR;
+
+#ifdef HAVE_SESSION_TICKET
+    ctx->noFreshStartCheck = 1;
+#endif
+
+    return 0;
 }
 
 /* Sets the maximum amount of early data that a client or server would like

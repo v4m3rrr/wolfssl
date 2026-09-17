@@ -66,6 +66,9 @@
     || defined(OPENSSL_EXTRA_X509_SMALL)                    \
     || defined(HAVE_WEBSERVER) || defined(WOLFSSL_KEY_GEN))
     #include <wolfssl/openssl/evp.h>
+    /* ed25519 compat helpers (wolfSSL_ED25519_new/free) are used by the X509
+     * Ed25519 paths, which also build under OPENSSL_EXTRA_X509_SMALL. */
+    #include <wolfssl/openssl/ed25519.h>
     /* openssl headers end, wolfssl internal headers next */
 #endif
 
@@ -93,7 +96,6 @@
     #include <wolfssl/openssl/pem.h>
     #include <wolfssl/openssl/ec.h>
     #include <wolfssl/openssl/ec25519.h>
-    #include <wolfssl/openssl/ed25519.h>
     #include <wolfssl/openssl/ec448.h>
     #include <wolfssl/openssl/ed448.h>
     #include <wolfssl/openssl/ecdsa.h>
@@ -6490,6 +6492,11 @@ int wolfSSL_CIPHER_get_auth_nid(const WOLFSSL_CIPHER* cipher)
         return WC_NID_undef;
     }
 
+    /* in TLS 1.3 case, NID will be WC_NID_auth_any */
+    if (XSTRCMP(n[0], "TLS13") == 0) {
+        return WC_NID_auth_any;
+    }
+
     authStr = GetCipherAuthStr(n);
 
     if (authStr != NULL) {
@@ -8409,6 +8416,13 @@ void wolfSSL_certs_clear(WOLFSSL* ssl)
     /* ctx still owns certificate, certChain, key, dh, and cm */
     if (ssl->buffers.weOwnCert) {
         FreeDer(&ssl->buffers.certificate);
+    #ifdef KEEP_OUR_CERT
+        /* ourCert is only made when this SSL owns the certificate. */
+        if (ssl->ourCert != NULL) {
+            wolfSSL_X509_free(ssl->ourCert);
+            ssl->ourCert = NULL;
+        }
+    #endif
         ssl->buffers.weOwnCert = 0;
     }
     ssl->buffers.certificate = NULL;
@@ -8417,8 +8431,12 @@ void wolfSSL_certs_clear(WOLFSSL* ssl)
         ssl->buffers.weOwnCertChain = 0;
     }
     ssl->buffers.certChain = NULL;
-#ifdef WOLFSSL_TLS13
     ssl->buffers.certChainCnt = 0;
+#ifdef KEEP_OUR_CERT
+    if (ssl->ourCertChain != NULL) {
+        wolfSSL_sk_X509_pop_free(ssl->ourCertChain, NULL);
+        ssl->ourCertChain = NULL;
+    }
 #endif
     if (ssl->buffers.weOwnKey) {
         FreeDer(&ssl->buffers.key);
@@ -8828,33 +8846,26 @@ WOLFSSL_CTX* wolfSSL_set_SSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
     ssl->ctx = ctx;
 
 #ifndef NO_CERTS
+    /* Release the certificate, chain and keys this SSL owns so that a ctx
+     * without them leaves none of the old ones behind. */
+    wolfSSL_certs_clear(ssl);
 #ifdef WOLFSSL_COPY_CERT
     /* If WOLFSSL_COPY_CERT defined, always make new copy of cert from ctx */
     if (ctx->certificate != NULL) {
-        if (ssl->buffers.certificate != NULL) {
-            FreeDer(&ssl->buffers.certificate);
-            ssl->buffers.certificate = NULL;
-        }
         ret = AllocCopyDer(&ssl->buffers.certificate, ctx->certificate->buffer,
             ctx->certificate->length, ctx->certificate->type,
             ctx->certificate->heap);
         if (ret != 0) {
-            ssl->buffers.weOwnCert = 0;
             return NULL;
         }
 
         ssl->buffers.weOwnCert = 1;
     }
     if (ctx->certChain != NULL) {
-        if (ssl->buffers.certChain != NULL) {
-            FreeDer(&ssl->buffers.certChain);
-            ssl->buffers.certChain = NULL;
-        }
         ret = AllocCopyDer(&ssl->buffers.certChain, ctx->certChain->buffer,
             ctx->certChain->length, ctx->certChain->type,
             ctx->certChain->heap);
         if (ret != 0) {
-            ssl->buffers.weOwnCertChain = 0;
             return NULL;
         }
 
@@ -8865,20 +8876,14 @@ WOLFSSL_CTX* wolfSSL_set_SSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
     ssl->buffers.certificate = ctx->certificate;
     ssl->buffers.certChain = ctx->certChain;
 #endif
-#ifdef WOLFSSL_TLS13
     ssl->buffers.certChainCnt = ctx->certChainCnt;
-#endif
 #ifndef WOLFSSL_BLIND_PRIVATE_KEY
 #ifdef WOLFSSL_COPY_KEY
-    if (ssl->buffers.key != NULL && ssl->buffers.weOwnKey) {
-        FreeDer(&ssl->buffers.key);
-    }
     if (ctx->privateKey != NULL) {
         ret = AllocCopyDer(&ssl->buffers.key, ctx->privateKey->buffer,
             ctx->privateKey->length, ctx->privateKey->type,
             ctx->privateKey->heap);
         if (ret != 0) {
-            ssl->buffers.weOwnKey = 0;
             return NULL;
         }
         ssl->buffers.weOwnKey = 1;
@@ -8891,15 +8896,13 @@ WOLFSSL_CTX* wolfSSL_set_SSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
 #endif
 #else
     if (ctx->privateKey != NULL) {
-        if (ssl->buffers.key != NULL && ssl->buffers.weOwnKey) {
-            FreeDer(&ssl->buffers.key);
-        }
         ret = AllocCopyDer(&ssl->buffers.key, ctx->privateKey->buffer,
             ctx->privateKey->length, ctx->privateKey->type,
             ctx->privateKey->heap);
         if (ret != 0) {
             return NULL;
         }
+        ssl->buffers.weOwnKey = 1;
         /* Blind the private key for the SSL with new random mask. */
         wolfssl_priv_der_blind_toggle(ssl->buffers.key, ctx->privateKeyMask);
         ret = wolfssl_priv_der_blind(ssl->rng, ssl->buffers.key,
@@ -8934,6 +8937,7 @@ WOLFSSL_CTX* wolfSSL_set_SSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
         if (ret != 0) {
             return NULL;
         }
+        ssl->buffers.weOwnAltKey = 1;
         /* Blind the private key for the SSL with new random mask. */
         wolfssl_priv_der_blind_toggle(ssl->buffers.altKey,
                                       ctx->altPrivateKeyMask);
@@ -9305,12 +9309,9 @@ WOLF_STACK_OF(WOLFSSL_CIPHER) *wolfSSL_get_ciphers_compat(const WOLFSSL *ssl)
         if (ssl->suitesStack == NULL)
             return NULL;
 
-        /* higher priority of cipher suite will be on top of stack */
-#if defined(OPENSSL_ALL)
-        for (i = suites->suiteSz - 2; i >=0; i-=2)
-#else
-        for (i = 0; i < suites->suiteSz; i+=2)
-#endif
+        /* Walk lowest priority first: each suite is inserted at index 0, so
+         * the highest priority suite ends up on top of the stack. */
+        for (i = suites->suiteSz - 2; i >= 0; i -= 2)
         {
             struct WOLFSSL_CIPHER cipher;
 
@@ -9354,6 +9355,49 @@ WOLF_STACK_OF(WOLFSSL_CIPHER) *wolfSSL_get_ciphers_compat(const WOLFSSL *ssl)
         }
     }
     return ssl->suitesStack;
+}
+
+/* Get the name of the cipher at index priority in the cipher list configured
+ * on this SSL. Index 0 is the highest priority suite. Returns NULL once
+ * priority is past the end of the list. Matches OpenSSL SSL_get_cipher_list().
+ */
+const char* wolfSSL_get_cipher_list_compat(const WOLFSSL* ssl, int priority)
+{
+    const Suites* suites;
+    int i;
+    int idx = 0;
+
+    WOLFSSL_ENTER("wolfSSL_get_cipher_list_compat");
+
+    if (ssl == NULL || priority < 0)
+        return NULL;
+
+    suites = WOLFSSL_SUITES(ssl);
+    if (suites == NULL)
+        return NULL;
+
+    for (i = 0; i < suites->suiteSz; i += 2) {
+        /* A couple of suites are placeholders for special options, skip
+         * those. */
+        if (SCSV_Check(suites->suites[i], suites->suites[i+1])
+                || sslCipherMinMaxCheck(ssl, suites->suites[i],
+                                        suites->suites[i+1])) {
+            continue;
+        }
+
+        if (idx++ == priority) {
+            /* Report the same name that SSL_CIPHER_get_name() would. */
+        #if !defined(WOLFSSL_CIPHER_INTERNALNAME) && \
+            !defined(NO_ERROR_STRINGS) && !defined(WOLFSSL_QT)
+            return GetCipherNameIana(suites->suites[i], suites->suites[i+1]);
+        #else
+            return wolfSSL_get_cipher_name_from_suite(suites->suites[i],
+                    suites->suites[i+1]);
+        #endif
+        }
+    }
+
+    return NULL;
 }
 #endif /* OPENSSL_EXTRA || OPENSSL_ALL || WOLFSSL_NGINX || WOLFSSL_HAPROXY */
 #ifdef OPENSSL_ALL

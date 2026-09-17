@@ -1463,6 +1463,11 @@ WOLFSSL_API int  wolfSSL_set_write_fd (WOLFSSL* ssl, int fd);
 WOLFSSL_API int  wolfSSL_set_read_fd (WOLFSSL* ssl, int fd);
 WOLFSSL_API char* wolfSSL_get_cipher_list(int priority);
 WOLFSSL_API char* wolfSSL_get_cipher_list_ex(WOLFSSL* ssl, int priority);
+#if defined(OPENSSL_EXTRA) || defined(OPENSSL_ALL) || \
+    defined(WOLFSSL_NGINX) || defined(WOLFSSL_HAPROXY)
+WOLFSSL_API const char* wolfSSL_get_cipher_list_compat(const WOLFSSL* ssl,
+    int priority);
+#endif
 WOLFSSL_API int  wolfSSL_get_ciphers(char* buf, int len);
 WOLFSSL_API int wolfSSL_get_ciphers_iana(char* buf, int len);
 WOLFSSL_API const char* wolfSSL_get_cipher_name(WOLFSSL* ssl);
@@ -1546,6 +1551,7 @@ WOLFSSL_API int  wolfSSL_write_early_data(WOLFSSL* ssl, const void* data,
 WOLFSSL_API int  wolfSSL_read_early_data(WOLFSSL* ssl, void* data, int sz,
                                          int* outSz);
 WOLFSSL_API int  wolfSSL_get_early_data_status(const WOLFSSL* ssl);
+WOLFSSL_API int  wolfSSL_CTX_no_early_data_fresh_start_check(WOLFSSL_CTX* ctx);
 #ifdef OPENSSL_EXTRA
 WOLFSSL_API unsigned int wolfSSL_SESSION_get_max_early_data(const WOLFSSL_SESSION *s);
 #endif /* OPENSSL_EXTRA */
@@ -3261,6 +3267,7 @@ enum { /* ssl Constants */
     WOLFSSL_VERIFY_NONE                 = 0,
     WOLFSSL_VERIFY_PEER                 = 1 << 0,
     WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT = 1 << 1,
+    /* For OpenSSL compatibility - ignored. */
     WOLFSSL_VERIFY_CLIENT_ONCE          = 1 << 2,
     WOLFSSL_VERIFY_POST_HANDSHAKE       = 1 << 3,
     WOLFSSL_VERIFY_FAIL_EXCEPT_PSK      = 1 << 4,
@@ -6319,8 +6326,11 @@ WOLFSSL_API int wolfSSL_CTX_AllowEncryptThenMac(WOLFSSL_CTX* ctx, int set);
 WOLFSSL_API int wolfSSL_AllowEncryptThenMac(WOLFSSL *s, int set);
 #endif
 
-/* This feature is used to set a fixed ephemeral key and is for testing only */
-/* Currently allows ECDHE and DHE only */
+/* This feature is used to set a fixed ephemeral key and is for testing only.
+ * Reusing a key share across connections is incorrect behavior
+ * and is forbidden by RFC 9846 Section 1.2 so do not enable this in
+ * production. */
+/* Currently allows DHE, ECDHE, X25519 and X448 only */
 #ifdef WOLFSSL_STATIC_EPHEMERAL
 WOLFSSL_API int wolfSSL_CTX_set_ephemeral_key(WOLFSSL_CTX* ctx, int keyAlgo,
     const char* key, unsigned int keySz, int format);

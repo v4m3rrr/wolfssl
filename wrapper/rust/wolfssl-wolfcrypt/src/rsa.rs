@@ -1077,9 +1077,6 @@ impl RSA {
 
     /// Check the PSS data to ensure the signature matches.
     ///
-    /// `set_rng()` must be called previously when wolfSSL is built with
-    /// WC_RSA_BLINDING option enabled.
-    ///
     /// # Parameters
     ///
     /// * `din`: Hash of data being verified.
@@ -1301,7 +1298,7 @@ impl RSA {
     /// # Example
     ///
     /// ```rust
-    /// #[cfg(all(rsa_direct, rsa_const_api))]
+    /// #[cfg(all(rsa_direct, rsa_const_api, random))]
     /// {
     /// use std::fs;
     /// use wolfssl_wolfcrypt::random::RNG;
@@ -1324,7 +1321,7 @@ impl RSA {
     /// assert_eq!(plain_out, plain);
     /// }
     /// ```
-    #[cfg(all(rsa_direct, rsa_const_api))]
+    #[cfg(all(rsa_direct, rsa_const_api, random))]
     pub fn rsa_direct(&mut self, din: &[u8], dout: &mut [u8], typ: i32, rng: &RNG) -> Result<usize, i32> {
         let din_size = crate::buffer_len_to_u32(din.len())?;
         let mut dout_size = crate::buffer_len_to_u32(dout.len())?;

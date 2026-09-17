@@ -3844,29 +3844,43 @@ int test_wc_PKCS7_DecodeAuthEnvelopedData_truncated(void)
 #if defined(HAVE_PKCS7) && defined(HAVE_AESGCM) && !defined(NO_RSA) && \
     !defined(NO_AES) && defined(WOLFSSL_AES_128) && !defined(NO_PKCS7_STREAM) \
     && defined(USE_WOLFSSL_MEMORY) && !defined(WOLFSSL_NO_MALLOC) && \
-    !defined(WOLFSSL_STATIC_MEMORY)
+    !defined(WOLFSSL_STATIC_MEMORY) && !defined(WOLFSSL_DEBUG_MEMORY)
 #define TEST_PKCS7_AUTHENV_LEAK
 
 static long pkcs7_leak_live;    /* outstanding allocations */
 
-static void* pkcs7_leak_malloc_cb(size_t size)
+/* These callback types take (func, line) too under WOLFSSL_DEBUG_MEMORY. */
+#ifdef WOLFSSL_DEBUG_MEMORY
+    #define PKCS7_LEAK_CB_TAIL   , const char* func, unsigned int line
+    #define PKCS7_LEAK_CB_UNUSED (void)func; (void)line;
+#else
+    #define PKCS7_LEAK_CB_TAIL
+    #define PKCS7_LEAK_CB_UNUSED
+#endif
+
+static void* pkcs7_leak_malloc_cb(size_t size PKCS7_LEAK_CB_TAIL)
 {
-    void* p = malloc(size);
+    void* p;
+    PKCS7_LEAK_CB_UNUSED
+    p = malloc(size);
     if (p != NULL)
         pkcs7_leak_live++;
     return p;
 }
 
-static void pkcs7_leak_free_cb(void* ptr)
+static void pkcs7_leak_free_cb(void* ptr PKCS7_LEAK_CB_TAIL)
 {
+    PKCS7_LEAK_CB_UNUSED
     if (ptr != NULL)
         pkcs7_leak_live--;
     free(ptr);
 }
 
-static void* pkcs7_leak_realloc_cb(void* ptr, size_t size)
+static void* pkcs7_leak_realloc_cb(void* ptr, size_t size PKCS7_LEAK_CB_TAIL)
 {
-    void* p = realloc(ptr, size);
+    void* p;
+    PKCS7_LEAK_CB_UNUSED
+    p = realloc(ptr, size);
     /* realloc(NULL, n) is an allocation; realloc(p, n) replaces one. */
     if (ptr == NULL && p != NULL)
         pkcs7_leak_live++;

@@ -261,7 +261,12 @@ enum ASNItem_DataType {
 #endif
 };
 
-/* A template entry describing an ASN.1 item. */
+/* A template entry describing an ASN.1 item.
+ *
+ * Templates are tables of these, used by both GetASN_Items() to decode and
+ * SizeASN_Items()/SetASN_Items() to encode. How to write one is documented
+ * in wolfcrypt/src/ASN_TEMPLATE.md - read that before adding a template.
+ */
 typedef struct ASNItem {
     /* Depth of ASN.1 item - how many constructed ASN.1 items above. */
     byte depth;
@@ -1501,6 +1506,7 @@ enum KeyIdType {
     #define EXTKEYUSE_SSH_CLIENT_AUTH    0x01
     #define EXTKEYUSE_SSH_MSCL           0x02
     #define EXTKEYUSE_SSH_KP_CLIENT_AUTH 0x04
+    #define EXTKEYUSE_SSH_SERVER_AUTH    0x08
 #endif /* WOLFSSL_WOLFSSH */
 
 #define WC_NS_SSL_CLIENT      0x80
@@ -1982,14 +1988,15 @@ struct DecodedCert {
 #if defined(HAVE_ECC) || defined(HAVE_ED25519) || defined(HAVE_ED448) || \
     defined(WOLFSSL_HAVE_MLDSA) || defined(HAVE_FALCON) || \
     defined(WOLFSSL_HAVE_SLHDSA) || defined(WOLFSSL_HAVE_LMS) || \
-    defined(WOLFSSL_HAVE_XMSS)
+    defined(WOLFSSL_HAVE_XMSS) || defined(WOLFSSL_HAVE_FRODOKEM) || \
+    defined(WOLFSSL_HAVE_MLKEM)
     word32  pkCurveOID;           /* Public Key's curve OID */
     #ifdef WOLFSSL_CUSTOM_CURVES
         int  pkCurveSize;         /* Public Key's curve size */
     #endif
 #endif /* HAVE_ECC || HAVE_ED25519 || HAVE_ED448 || WOLFSSL_HAVE_MLDSA ||
         * HAVE_FALCON || WOLFSSL_HAVE_SLHDSA || WOLFSSL_HAVE_LMS ||
-        * WOLFSSL_HAVE_XMSS */
+        * WOLFSSL_HAVE_XMSS || WOLFSSL_HAVE_FRODOKEM || WOLFSSL_HAVE_MLKEM */
     const byte* beforeDate;
     int     beforeDateLen;
     const byte* afterDate;
@@ -2182,7 +2189,10 @@ struct DecodedCert {
     WC_BITFIELD extPolicyConstIpmSet:1; /* inhibitPolicyMapping set */
     WC_BITFIELD extSubjAltNameSet:1;
     WC_BITFIELD inhibitAnyOidSet:1;
-    WC_BITFIELD selfSigned:1;           /* Indicates subject and issuer are same */
+#ifndef IGNORE_NETSCAPE_CERT_TYPE
+    WC_BITFIELD extNetscapeCertTypeSet:1;  /* Netscape certificate type seen */
+#endif
+    WC_BITFIELD selfSigned:1;          /* Indicates subject and issuer are same */
 #if defined(WOLFSSL_SEP) || defined(WOLFSSL_CERT_EXT)
     WC_BITFIELD extCertPolicySet:1;
 #endif
@@ -2907,7 +2917,8 @@ enum cert_enums {
     LMS_KEY                  = 36,
     XMSS_KEY                 = 37,
     XMSSMT_KEY               = 38,
-    FRODOKEM_KEY             = 39
+    FRODOKEM_KEY             = 39,
+    MLKEM_KEY                = 40
 };
 
 #ifndef WOLFSSL_NO_DILITHIUM_LEGACY_NAMES
@@ -3376,7 +3387,8 @@ WOLFSSL_LOCAL int  wolfssl_local_MatchDnsNameConstraint(const char* name,
     || (defined(HAVE_ED448) && defined(HAVE_ED448_KEY_IMPORT)) \
     || (defined(HAVE_CURVE448) && defined(HAVE_CURVE448_KEY_IMPORT)) \
     || defined(HAVE_FALCON) || defined(WOLFSSL_HAVE_MLDSA) \
-    || defined(WOLFSSL_HAVE_SLHDSA) || defined(WOLFSSL_HAVE_FRODOKEM))
+    || defined(WOLFSSL_HAVE_SLHDSA) || defined(WOLFSSL_HAVE_FRODOKEM) \
+    || (defined(WOLFSSL_HAVE_MLKEM) && !defined(WOLFSSL_MLKEM_NO_ASN1)))
 WOLFSSL_LOCAL int DecodeAsymKey_Assign(const byte* input, word32* inOutIdx,
     word32 inSz, const byte** seed, word32* seedLen, const byte** privKey,
     word32* privKeyLen, const byte** pubKey, word32* pubKeyLen,

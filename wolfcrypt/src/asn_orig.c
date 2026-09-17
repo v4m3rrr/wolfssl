@@ -3986,6 +3986,9 @@ int DecodeExtKeyUsage(const byte* input, word32 sz,
             case EKU_SSH_KP_CLIENT_AUTH_OID:
                 *extExtKeyUsageSsh |= EXTKEYUSE_SSH_KP_CLIENT_AUTH;
                 break;
+            case EKU_SSH_SERVER_AUTH_OID:
+                *extExtKeyUsageSsh |= EXTKEYUSE_SSH_SERVER_AUTH;
+                break;
             #endif /* WOLFSSL_WOLFSSH */
             default:
                 break;
@@ -4161,6 +4164,7 @@ static int DecodeCertPolicy(const byte* input, word32 sz, DecodedCert* cert)
 {
     word32 idx = 0;
     word32 oldIdx;
+    word32 seqEnd;
     int policy_length = 0;
     int ret;
     int total_length = 0;
@@ -4184,10 +4188,16 @@ static int DecodeCertPolicy(const byte* input, word32 sz, DecodedCert* cert)
     }
 
     /* Validate total length */
-    if (total_length > (int)(sz - idx)) {
+    if (total_length != (int)(sz - idx)) {
         WOLFSSL_MSG("\tCertPolicy length mismatch");
         return ASN_PARSE_E;
     }
+
+    if (total_length == 0) {
+        WOLFSSL_MSG("\tCertPolicy empty sequence");
+        return ASN_PARSE_E;
+    }
+    seqEnd = idx + (word32)total_length;
 
     /* Unwrap certificatePolicies */
     do {
@@ -4254,7 +4264,8 @@ static int DecodeCertPolicy(const byte* input, word32 sz, DecodedCert* cert)
     #endif
         }
         idx += (word32)policy_length;
-    } while((int)idx < total_length
+    /* Stop at the end of the certificatePolicies SEQUENCE. */
+    } while(idx < seqEnd
     #ifdef WOLFSSL_CERT_EXT
         && cert->extCertPoliciesNb < MAX_CERTPOL_NB
     #endif
@@ -5911,10 +5922,6 @@ int SetNameEx(byte* output, word32 outputSz, CertName* name, void* heap)
 
 /* Set Date validity from now until now + daysValid
  * return size in bytes written to output, 0 on error */
-/* TODO https://datatracker.ietf.org/doc/html/rfc5280#section-4.1.2.5
- * "MUST always encode certificate validity dates through the year 2049 as
- *  UTCTime; certificate validity dates in 2050 or later MUST be encoded as
- *  GeneralizedTime." */
 static int SetValidity(byte* output, int daysValid)
 {
 #ifndef NO_ASN_TIME
@@ -5922,6 +5929,8 @@ static int SetValidity(byte* output, int daysValid)
     byte  after[MAX_DATE_SIZE];
 
     word32 beforeSz, afterSz, seqSz;
+    word32 timeSz;
+    byte format;
 
     time_t now;
     time_t then;
@@ -5941,9 +5950,6 @@ static int SetValidity(byte* output, int daysValid)
     now = wc_Time(0);
 
     /* before now */
-    before[0] = ASN_GENERALIZED_TIME;
-    beforeSz = SetLength(ASN_GEN_TIME_SZ, before + 1) + 1;  /* gen tag */
-
     /* subtract 1 day of seconds for more compliance */
     then = now - 86400;
     expandedTime = XGMTIME(&then, tmpTime);
@@ -5957,11 +5963,13 @@ static int SetValidity(byte* output, int daysValid)
     localTime.tm_year += 1900;
     localTime.tm_mon +=    1;
 
-    SetTime(&localTime, before + beforeSz);
-    beforeSz += ASN_GEN_TIME_SZ;
-
-    after[0] = ASN_GENERALIZED_TIME;
-    afterSz  = SetLength(ASN_GEN_TIME_SZ, after + 1) + 1;  /* gen tag */
+    format = ValidityTimeFormat(&localTime);
+    timeSz = (format == ASN_UTC_TIME) ? ASN_UTC_TIME_SIZE - 1
+                                      : ASN_GEN_TIME_SZ;
+    before[0] = format;
+    beforeSz = SetLength(timeSz, before + 1) + 1;
+    SetTime(&localTime, before + beforeSz, format);
+    beforeSz += timeSz;
 
     /* add daysValid of seconds */
     then = now + (daysValid * (time_t)86400);
@@ -5976,8 +5984,13 @@ static int SetValidity(byte* output, int daysValid)
     localTime.tm_year += 1900;
     localTime.tm_mon  +=    1;
 
-    SetTime(&localTime, after + afterSz);
-    afterSz += ASN_GEN_TIME_SZ;
+    format = ValidityTimeFormat(&localTime);
+    timeSz = (format == ASN_UTC_TIME) ? ASN_UTC_TIME_SIZE - 1
+                                      : ASN_GEN_TIME_SZ;
+    after[0] = format;
+    afterSz  = SetLength(timeSz, after + 1) + 1;
+    SetTime(&localTime, after + afterSz, format);
+    afterSz += timeSz;
 
     /* headers and output */
     seqSz = SetSequence(beforeSz + afterSz, output);
@@ -6596,7 +6609,8 @@ static int MakeAnyCert(Cert* cert, byte* derBuffer, word32 derSz,
                        DsaKey* dsaKey, ed25519_key* ed25519Key,
                        ed448_key* ed448Key, falcon_key* falconKey,
                        wc_MlDsaKey* mldsaKey, SlhDsaKey* slhDsaKey,
-                       LmsKey* lmsKey, XmssKey* xmssKey, void* frodoKey)
+                       LmsKey* lmsKey, XmssKey* xmssKey, void* frodoKey,
+                       void* mlKemKey)
 {
     int ret;
     WC_DECLARE_VAR(der, DerCert, 1, 0);
@@ -6613,6 +6627,11 @@ static int MakeAnyCert(Cert* cert, byte* derBuffer, word32 derSz,
     }
     if (frodoKey != NULL) {
         WOLFSSL_MSG("FrodoKEM certificate generation requires "
+                    "WOLFSSL_ASN_TEMPLATE");
+        return ALGO_ID_E;
+    }
+    if (mlKemKey != NULL) {
+        WOLFSSL_MSG("ML-KEM certificate generation requires "
                     "WOLFSSL_ASN_TEMPLATE");
         return ALGO_ID_E;
     }
@@ -7246,7 +7265,7 @@ static int MakeCertReq(Cert* cert, byte* derBuffer, word32 derSz,
                    ed25519_key* ed25519Key, ed448_key* ed448Key,
                    falcon_key* falconKey, wc_MlDsaKey* mldsaKey,
                    SlhDsaKey* slhDsaKey, LmsKey* lmsKey, XmssKey* xmssKey,
-                   void* frodoKey)
+                   void* frodoKey, void* mlKemKey)
 {
     int ret;
     WC_DECLARE_VAR(der, DerCert, 1, 0);
@@ -7260,6 +7279,11 @@ static int MakeCertReq(Cert* cert, byte* derBuffer, word32 derSz,
     }
     if (frodoKey != NULL) {
         WOLFSSL_MSG("FrodoKEM certificate request generation requires "
+                    "WOLFSSL_ASN_TEMPLATE");
+        return ALGO_ID_E;
+    }
+    if (mlKemKey != NULL) {
+        WOLFSSL_MSG("ML-KEM certificate request generation requires "
                     "WOLFSSL_ASN_TEMPLATE");
         return ALGO_ID_E;
     }
@@ -8443,6 +8467,8 @@ static int DecodeSingleResponse(byte* source, word32* ioIndex, word32 size,
 
 #ifndef NO_ASN_TIME_CHECK
 #ifndef WOLFSSL_NO_OCSP_DATE_CHECK
+    /* If you are enabling WOLFSSL_NO_OCSP_DATE_CHECK because of an inaccurate
+     * clock consider WOLFSSL_BEFORE_DATE_CLOCK_SKEW. */
     if ((! AsnSkipDateCheck) && !XVALIDATE_DATE(single->status->thisDate,
         single->status->thisDateFormat, ASN_BEFORE, MAX_DATE_SIZE))
         return ASN_BEFORE_DATE_E;
@@ -8480,6 +8506,8 @@ static int DecodeSingleResponse(byte* source, word32* ioIndex, word32 size,
 
 #ifndef NO_ASN_TIME_CHECK
 #ifndef WOLFSSL_NO_OCSP_DATE_CHECK
+        /* If you are enabling WOLFSSL_NO_OCSP_DATE_CHECK because of an
+         * inaccurate clock consider WOLFSSL_AFTER_DATE_CLOCK_SKEW. */
         if ((! AsnSkipDateCheck) &&
             !XVALIDATE_DATE(single->status->nextDate,
                             single->status->nextDateFormat, ASN_AFTER, MAX_DATE_SIZE))

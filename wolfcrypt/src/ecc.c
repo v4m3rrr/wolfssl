@@ -378,15 +378,33 @@ ECC Curve Sizes:
 #endif
 
 #ifdef WOLFSSL_ECC_BLIND_K
+/* Number of digits covered by the fixed-width XORs below. */
+#define ECC_BLIND_K_DIGITS(key) \
+    ((int)(((key)->dp->size + sizeof(mp_digit) - 1) / sizeof(mp_digit)))
+
+/* The XORs read this many whole digits regardless of each operand's current
+ * length, so operands written at partial width (e.g. by mp_copy()) must be
+ * zero-extended first or stale digits fold into the value. mp_grow() cannot
+ * fail for a curve-sized key; fail closed if it ever does. */
 mp_int* ecc_get_k(ecc_key* key)
 {
-    mp_xor_ct(key->k, key->kb, key->dp->size, key->ku);
+    if ((mp_grow(key->k, ECC_BLIND_K_DIGITS(key)) != MP_OKAY) ||
+        (mp_grow(key->kb, ECC_BLIND_K_DIGITS(key)) != MP_OKAY)) {
+        mp_forcezero(key->ku);
+    }
+    else {
+        mp_xor_ct(key->k, key->kb, key->dp->size, key->ku);
+    }
     return key->ku;
 }
 void ecc_blind_k(ecc_key* key, mp_int* b)
 {
-    mp_xor_ct(key->k, b, key->dp->size, key->k);
-    mp_xor_ct(key->kb, b, key->dp->size, key->kb);
+    if ((mp_grow(key->k, ECC_BLIND_K_DIGITS(key)) == MP_OKAY) &&
+        (mp_grow(key->kb, ECC_BLIND_K_DIGITS(key)) == MP_OKAY) &&
+        (mp_grow(b, ECC_BLIND_K_DIGITS(key)) == MP_OKAY)) {
+        mp_xor_ct(key->k, b, key->dp->size, key->k);
+        mp_xor_ct(key->kb, b, key->dp->size, key->kb);
+    }
 }
 int ecc_blind_k_rng(ecc_key* key, WC_RNG* rng)
 {
@@ -405,10 +423,16 @@ int ecc_blind_k_rng(ecc_key* key, WC_RNG* rng)
         }
     }
     if (ret == 0) {
-        ret = mp_rand(key->kb, (key->dp->size + sizeof(mp_digit) - 1) /
-            sizeof(mp_digit), rng);
+        ret = mp_rand(key->kb, ECC_BLIND_K_DIGITS(key), rng);
+        if (ret == 0) {
+            ret = mp_grow(key->k, ECC_BLIND_K_DIGITS(key));
+        }
         if (ret == 0) {
             mp_xor_ct(key->k, key->kb, key->dp->size, key->k);
+        }
+        else {
+            /* No blind installed - keep the stored pair consistent. */
+            mp_forcezero(key->kb);
         }
     }
 
@@ -416,6 +440,13 @@ int ecc_blind_k_rng(ecc_key* key, WC_RNG* rng)
         wc_FreeRng(&local_rng);
     }
     return ret;
+}
+
+void ecc_forcezero_k(ecc_key* key)
+{
+    mp_forcezero(key->k);
+    mp_forcezero(key->kb);
+    mp_forcezero(key->ku);
 }
 
 mp_int* wc_ecc_key_get_priv(ecc_key* key)
@@ -6290,9 +6321,9 @@ int wc_ecc_make_key_ex2(WC_RNG* rng, int keysize, ecc_key* key, int curve_id,
         ) {
         err = _ecc_pairwise_consistency_test(key, rng);
     }
-    /* FIPS 140-3 IG 10.3.A (TE10.35.02): a key pair that fails post-
-     * generation validation or PCT must be rendered unusable so a caller
-     * that ignores the return value cannot use it. */
+    /* Free a key that failed its check, so a caller ignoring the return
+     * value cannot use it.  ISO/IEC 19790:2012 sec 7.10.1 forbids using
+     * anything that failed a self-test. */
     if (err != MP_OKAY) {
         wc_ecc_free(key);
     }
@@ -6848,7 +6879,7 @@ static int wc_ecc_sign_hash_hw(const byte* in, word32 inlen,
         mp_reverse(&out[keysize], keysize);
 
 error_out:
-        ForceZero(K, MAX_ECC_BYTES);
+        ForceZero(K, keysize);
         WC_FREE_VAR_EX(incopy, key->heap, DYNAMIC_TYPE_HASH_TMP);
         WC_FREE_VAR_EX(K, key->heap, DYNAMIC_TYPE_PRIVATE_KEY);
         if (err) {
@@ -8636,88 +8667,150 @@ int wc_ecc_free(ecc_key* key)
     !defined(WOLFSSL_CRYPTOCELL) && !defined(WOLFSSL_SP_MATH) && \
     (!defined(WOLF_CRYPTO_CB_ONLY_ECC) || defined(WOLFSSL_QNX_CAAM) || \
       defined(WOLFSSL_IMXRT1170_CAAM))
-/* Handles add failure cases:
+/* Set a point to the representation of infinity, (0, 0, 1). */
+static int ecc_set_point_infinity(ecc_point* P)
+{
+    int err = mp_set(P->x, 0);
+    if (err == MP_OKAY)
+        err = mp_set(P->y, 0);
+    if (err == MP_OKAY)
+        err = mp_set(P->z, 1);
+    return err;
+}
+
+/* Copy S over D when copy is non-zero, without branching on copy. */
+static int ecc_cond_copy_point(ecc_point* S, int copy, ecc_point* D)
+{
+    int err = mp_cond_copy(S->x, copy, D->x);
+    if (err == MP_OKAY)
+        err = mp_cond_copy(S->y, copy, D->y);
+    if (err == MP_OKAY)
+        err = mp_cond_copy(S->z, copy, D->z);
+    return err;
+}
+
+/* Add A and B, handling the exceptional cases the projective add formula
+ * cannot represent. The exceptional inputs are noted with non-short-circuit
+ * tests, then the add always runs and the exceptional results are selected
+ * in over its output:
  *
- * Before add:
- *   Case 1: A is infinity
- *        -> Copy B into result.
- *   Case 2: B is infinity
- *        -> Copy A into result.
- *   Case 3: x and z are the same in A and B (same x value in affine)
- *     Case 3a: y values the same - same point
- *           -> Double instead of add.
- *     Case 3b: y values different - negative of the other when points on curve
- *           -> Need to set result to infinity.
+ *   A is infinity     -> B copied over the result.
+ *   B is infinity     -> A copied over the result.
+ *   A = -B, same z    -> The add doubles instead; result set to infinity.
+ *   A = B             -> Doubled by the add itself when the z values match;
+ *                        all-zero result when they differ - doubled here.
+ *   A + B = infinity  -> Add result has z == 0, x/y not 0; set to infinity.
  *
- * After add:
- *   Case 1: A and B are the same point (maybe different z)
- *           (Result was: x == y == z == 0)
- *        -> Need to double instead.
- *
- *   Case 2: A + B = <infinity> = 0.
- *           (Result was: z == 0, x and/or y not 0)
- *        -> Need to set result to infinity.
+ * The infinity out-flag is set only for the last two cases - a finite pair
+ * whose sum is infinity - matching the original branching version, which
+ * never touched the flag when copying an operand out.
  */
 int ecc_projective_add_point_safe(ecc_point* A, ecc_point* B, ecc_point* R,
     mp_int* a, mp_int* modulus, mp_digit mp, int* infinity)
 {
     int err;
+    int aInf;
+    int bInf;
+    int nInf;
+    int rInf = 0;
+#ifdef WOLFSSL_SMALL_STACK
+    ecc_point* T = NULL;
+#else
+    ecc_point  T_lcl[1];
+    ecc_point* T = T_lcl;
+#endif
 
-    if (mp_iszero(A->x) && mp_iszero(A->y)) {
-        /* A is infinity. */
-        err = wc_ecc_copy_point(B, R);
+    /* Note the exceptional inputs with non-short-circuit tests, then add
+     * regardless, so they cost the same as the ordinary case. The result
+     * goes to a temporary: callers pass the first operand as the
+     * destination, so writing R early would destroy A before the selection
+     * below. */
+    aInf  = (mp_iszero(A->x) == MP_YES);
+    aInf &= (mp_iszero(A->y) == MP_YES);
+    bInf  = (mp_iszero(B->x) == MP_YES);
+    bInf &= (mp_iszero(B->y) == MP_YES);
+
+    /* A = -B with matching z gives infinity, which the add turns into a
+     * double instead: note it now and write infinity over the result after
+     * the add. A = B needs no note - the add doubles it correctly. */
+    nInf  = (mp_cmp(A->x, B->x) == MP_EQ);
+    nInf &= (mp_cmp(A->z, B->z) == MP_EQ);
+    nInf &= (mp_cmp(A->y, B->y) != MP_EQ);
+    nInf &= (aInf == 0);
+    nInf &= (bInf == 0);
+
+    /* Off the stack unless the build asked for small stacks. Inherit the
+     * key's heap and small-stack cache from R so the temporary behaves like
+     * the caller's own points - this is the scalar multiplication inner
+     * loop. */
+#if defined(WOLFSSL_SMALL_STACK_CACHE) && !defined(WOLFSSL_ECC_NO_SMALL_STACK)
+    err = wc_ecc_new_point_ex(&T, (R->key != NULL) ? R->key->heap : NULL);
+#else
+    err = wc_ecc_new_point_ex(&T, NULL);
+#endif
+    if (err != MP_OKAY) {
+        return err;
     }
-    else if (mp_iszero(B->x) && mp_iszero(B->y)) {
-        /* B is infinity. */
-        err = wc_ecc_copy_point(A, R);
-    }
-    else if ((mp_cmp(A->x, B->x) == MP_EQ) && (mp_cmp(A->z, B->z) == MP_EQ)) {
-        /* x ordinattes the same. */
-        if (mp_cmp(A->y, B->y) == MP_EQ) {
-            /* A = B */
-            err = _ecc_projective_dbl_point(B, R, a, modulus, mp);
-        }
-        else {
-            /* A = -B */
-            err = mp_set(R->x, 0);
-            if (err == MP_OKAY)
-                err = mp_set(R->y, 0);
-            if (err == MP_OKAY)
-                err = mp_set(R->z, 1);
-            if ((err == MP_OKAY) && (infinity != NULL))
-                *infinity = 1;
-        }
-    }
-    else {
-        err = _ecc_projective_add_point(A, B, R, a, modulus, mp);
-        if ((err == MP_OKAY) && mp_iszero(R->z)) {
-            /* When all zero then should have done a double */
-            if (mp_iszero(R->x) && mp_iszero(R->y)) {
-                if (mp_iszero(B->z)) {
-                    err = wc_ecc_copy_point(B, R);
-                    if (err == MP_OKAY) {
-                        err = mp_montgomery_calc_normalization(R->z, modulus);
-                    }
-                    if (err == MP_OKAY) {
-                        err = _ecc_projective_dbl_point(R, R, a, modulus, mp);
-                    }
+#if defined(WOLFSSL_SMALL_STACK_CACHE) && !defined(WOLFSSL_ECC_NO_SMALL_STACK)
+    T->key = R->key;
+#endif
+
+    err = _ecc_projective_add_point(A, B, T, a, modulus, mp);
+    if ((err == MP_OKAY) && mp_iszero(T->z)) {
+        /* When all zero then should have done a double */
+        if (mp_iszero(T->x) && mp_iszero(T->y)) {
+            if (mp_iszero(B->z)) {
+                err = wc_ecc_copy_point(B, T);
+                if (err == MP_OKAY) {
+                    err = mp_montgomery_calc_normalization(T->z, modulus);
                 }
-                else {
-                    err = _ecc_projective_dbl_point(B, R, a, modulus, mp);
+                if (err == MP_OKAY) {
+                    err = _ecc_projective_dbl_point(T, T, a, modulus, mp);
                 }
             }
-            /* When only Z zero then result is infinity */
             else {
-                err = mp_set(R->x, 0);
-                if (err == MP_OKAY)
-                    err = mp_set(R->y, 0);
-                if (err == MP_OKAY)
-                    err = mp_set(R->z, 1);
-                if ((err == MP_OKAY) && (infinity != NULL))
-                    *infinity = 1;
+                err = _ecc_projective_dbl_point(B, T, a, modulus, mp);
             }
         }
+        /* When only Z zero then result is infinity */
+        else {
+            err = ecc_set_point_infinity(T);
+            rInf = 1;
+        }
     }
+
+    /* A = -B with matching z: replace the double the add produced. */
+    if ((err == MP_OKAY) && nInf) {
+        err = ecc_set_point_infinity(T);
+        rInf = 1;
+    }
+
+    /* Select without branching on which operand was infinity: A infinity
+     * gives B, B infinity gives A. Both infinity leaves A, itself infinity,
+     * so needs no separate case. */
+    if (err == MP_OKAY)
+        err = ecc_cond_copy_point(B, aInf, T);
+    if (err == MP_OKAY)
+        err = ecc_cond_copy_point(A, bInf, T);
+    if (err == MP_OKAY)
+        err = wc_ecc_copy_point(T, R);
+
+    /* An infinity operand feeds the raw formula a shape it cannot represent,
+     * so the add's infinity note may be spurious. The selection above then
+     * replaces the result with the other operand, and that selection
+     * overrides the note as well: the flag reports only a result the add
+     * itself produced. */
+    rInf &= (aInf == 0);
+    rInf &= (bInf == 0);
+    if ((err == MP_OKAY) && (infinity != NULL) && (rInf != 0))
+        *infinity = 1;
+
+#if defined(WOLFSSL_SMALL_STACK_CACHE) && !defined(WOLFSSL_ECC_NO_SMALL_STACK)
+    T->key = NULL;
+    wc_ecc_del_point_ex(T, (R->key != NULL) ? R->key->heap : NULL);
+#else
+    wc_ecc_del_point_ex(T, NULL);
+#endif
 
     return err;
 }
@@ -8731,19 +8824,19 @@ int ecc_projective_dbl_point_safe(ecc_point *P, ecc_point *R, mp_int* a,
                                   mp_int* modulus, mp_digit mp)
 {
     int err;
+    int inf;
 
-    if (mp_iszero(P->x) && mp_iszero(P->y)) {
-        /* P is infinity. */
-        err = wc_ecc_copy_point(P, R);
-    }
-    else {
-        err = _ecc_projective_dbl_point(P, R, a, modulus, mp);
-        if ((err == MP_OKAY) && mp_iszero(R->z)) {
-           err = mp_set(R->x, 0);
-           if (err == MP_OKAY)
-               err = mp_set(R->y, 0);
-           if (err == MP_OKAY)
-               err = mp_set(R->z, 1);
+    /* Note infinity before doubling - callers alias source and destination -
+     * then double regardless so the exceptional case costs the same. Doubling
+     * infinity gives infinity, as does a zero Z; both are written (0, 0, 1). */
+    inf  = (mp_iszero(P->x) == MP_YES);
+    inf &= (mp_iszero(P->y) == MP_YES);
+
+    err = _ecc_projective_dbl_point(P, R, a, modulus, mp);
+    if (err == MP_OKAY) {
+        inf |= (mp_iszero(R->z) == MP_YES);
+        if (inf) {
+            err = ecc_set_point_infinity(R);
         }
     }
 
@@ -11544,10 +11637,10 @@ static int _ecc_import_x963_ex2(const byte* in, word32 inLen, ecc_key* key,
             else
                 inLen = inLen*2 + 1;  /* used uncompressed len */
         }
+        if (err == MP_OKAY)
     #endif
-
         /* determine key size */
-        if (err == MP_OKAY) {
+        {
             keysize = (int)(inLen>>1);
             /* NOTE: FIPS v6.0.0 or greater, no restriction on imported keys,
              *       only on created keys or signatures */
@@ -15068,6 +15161,41 @@ int wc_ecc_ctx_get_info(ecEncCtx* ctx, const byte** info, word32* sz)
 
     *info = ctx->kdfInfo;
     *sz   = ctx->kdfInfoSz;
+
+    return 0;
+}
+
+int wc_ecc_ctx_get_mac_salt(ecEncCtx* ctx, const byte** salt, word32* sz)
+{
+    if (ctx == NULL || salt == NULL || sz == NULL)
+        return BAD_FUNC_ARG;
+
+    *salt = ctx->macSalt;
+    *sz   = ctx->macSaltSz;
+
+    return 0;
+}
+
+/* Read the client or server role, which picks which half of the derived key
+ * this message uses. */
+int wc_ecc_ctx_get_protocol(ecEncCtx* ctx, int* protocol)
+{
+    if (ctx == NULL || protocol == NULL)
+        return BAD_FUNC_ARG;
+
+    *protocol = ctx->protocol;
+
+    return 0;
+}
+
+/* Read the RNG a caller set on the context, for backends that need one
+ * instead of standing up a DRBG of their own. */
+int wc_ecc_ctx_get_rng(ecEncCtx* ctx, WC_RNG** rng)
+{
+    if (ctx == NULL || rng == NULL)
+        return BAD_FUNC_ARG;
+
+    *rng = ctx->rng;
 
     return 0;
 }

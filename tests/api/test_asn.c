@@ -440,7 +440,8 @@ int test_DecodeAsymKey_lenient_versions(void)
 {
     EXPECT_DECLS;
 #if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_EXPORT) && \
-    defined(HAVE_ED25519_KEY_IMPORT) && defined(WOLFSSL_KEY_GEN)
+    defined(HAVE_ED25519_KEY_IMPORT) && defined(WOLFSSL_KEY_GEN) && \
+    defined(HAVE_ED25519_MAKE_KEY)
     ed25519_key key;
     ed25519_key parsed;
     WC_RNG rng;
@@ -519,7 +520,8 @@ int test_DecodeAsymKey_negative(void)
 {
     EXPECT_DECLS;
 #if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_EXPORT) && \
-    defined(HAVE_ED25519_KEY_IMPORT) && defined(WOLFSSL_KEY_GEN)
+    defined(HAVE_ED25519_KEY_IMPORT) && defined(WOLFSSL_KEY_GEN) && \
+    defined(HAVE_ED25519_MAKE_KEY)
     ed25519_key key;
     ed25519_key parsed;
     WC_RNG rng;
@@ -901,6 +903,43 @@ static int dirNameEnc(byte* out, word32 outSz, const DirTestAttr* attrs,
     return (int)idx;
 }
 
+/* Encode "Forbid" <cp> "den" as a UTF8String value, i.e. one code point in
+ * the middle of a name that is otherwise "Forbidden". A code point RFC 4518
+ * Sec. 2.2 maps to nothing drops out and leaves "Forbidden"; any other one
+ * stays and makes it a different name. Returns the encoded length. */
+static word32 dirUtf8Probe(byte* out, word32 cp)
+{
+    static const byte head[] = { 'F','o','r','b','i','d' };
+    static const byte tail[] = { 'd','e','n' };
+    word32 idx = (word32)sizeof(head);
+
+    XMEMCPY(out, head, sizeof(head));
+
+    if (cp < 0x80U) {
+        out[idx++] = (byte)cp;
+    }
+    else if (cp < 0x800U) {
+        out[idx++] = (byte)(0xC0U | (cp >> 6));
+        out[idx++] = (byte)(0x80U | (cp & 0x3FU));
+    }
+    else if (cp < 0x10000U) {
+        out[idx++] = (byte)(0xE0U | (cp >> 12));
+        out[idx++] = (byte)(0x80U | ((cp >> 6) & 0x3FU));
+        out[idx++] = (byte)(0x80U | (cp & 0x3FU));
+    }
+    else {
+        out[idx++] = (byte)(0xF0U | (cp >> 18));
+        out[idx++] = (byte)(0x80U | ((cp >> 12) & 0x3FU));
+        out[idx++] = (byte)(0x80U | ((cp >> 6) & 0x3FU));
+        out[idx++] = (byte)(0x80U | (cp & 0x3FU));
+    }
+
+    XMEMCPY(out + idx, tail, sizeof(tail));
+    idx += (word32)sizeof(tail);
+
+    return idx;
+}
+
 /* Encode both names and run them through the directoryName matcher. */
 static int dirMatch(const DirTestAttr* nm, int nmCnt, const DirTestAttr* bs,
                     int bsCnt)
@@ -1035,6 +1074,33 @@ int test_wolfssl_local_MatchBaseName(void)
                 "user@domain.com", 15, "@domain.com", 11), 0);
     ExpectIntEQ(wolfssl_local_MatchBaseName(ASN_RFC822_TYPE,
                 "user@domain.com", 15, "user@", 5), 0);
+
+    /* Regression: the scan for '@' in the base must test the length bound
+     * before dereferencing. The base is passed with an explicit length and
+     * is not required to be NUL terminated, so a bare-domain constraint
+     * (no '@' anywhere in it) used to read base[baseSz]. Run the same
+     * cases against a heap buffer holding exactly baseSz bytes with no
+     * terminator, so that the over-read is a heap overflow that ASAN or
+     * valgrind will catch. */
+    {
+        const char* bases[] = { "domain.com", ".domain.com", "user@domain.com" };
+        const int   expect[] = { 1, 0, 1 };
+        size_t      i;
+
+        for (i = 0; i < XELEM_CNT(bases); i++) {
+            char* base = NULL;
+            int   baseSz = (int)XSTRLEN(bases[i]);
+
+            ExpectNotNull(base = (char*)XMALLOC((size_t)baseSz, NULL,
+                DYNAMIC_TYPE_TMP_BUFFER));
+            if (base != NULL) {
+                XMEMCPY(base, bases[i], (size_t)baseSz);
+                ExpectIntEQ(wolfssl_local_MatchBaseName(ASN_RFC822_TYPE,
+                    "user@domain.com", 15, base, baseSz), expect[i]);
+                XFREE(base, NULL, DYNAMIC_TYPE_TMP_BUFFER);
+            }
+        }
+    }
 
     /*
      * Tests for directory type (ASN_DIR_TYPE = 0x04)
@@ -1288,6 +1354,131 @@ int test_wolfssl_local_MatchBaseName(void)
                 ExpectIntEQ(dirMatch(nm, 1, bForBid, 1),
                             WC_NO_ERR_TRACE(ASN_PARSE_E));
             }
+
+            /* EN SPACE, one of the EN QUAD (U+2000) to HAIR SPACE (U+200A)
+             * block that Sec. 2.2 gives as a range rather than one by one. */
+            {
+                static const byte forEnSpBid[] =
+                    { 'F','o','r', 0xe2,0x80,0x82, 'b','i','d' };
+                const DirTestAttr nm[] = {
+                    { DIR_OID_O, ASN_UTF8STRING, forEnSpBid,
+                      sizeof(forEnSpBid) }
+                };
+                ExpectIntEQ(dirMatch(nm, 1, bForBid, 1), 1);
+            }
+
+            /* The code points Sec. 2.2 maps to nothing, given there as
+             * ranges. Each range is probed just inside and just outside
+             * both of its bounds: inside, the code point drops out of the
+             * name and what is left is "Forbidden"; outside, it stays and
+             * the name is a different one. A range left unmapped would let
+             * a certificate carrying one of its code points inside a name
+             * pass an excluded subtree. */
+            {
+                static const struct {
+                    word32 cp;      /* Code point placed inside the name. */
+                    int    drops;   /* 1 when Sec. 2.2 maps it to nothing. */
+                } probes[] = {
+                    /* Below CHARACTER TABULATION, and the C0 controls above
+                     * CARRIAGE RETURN. */
+                    { 0x00001, 1 }, { 0x00010, 1 },
+                    /* DELETE through U+0084, and the C1 controls above NEXT
+                     * LINE; U+0100 is past both. */
+                    { 0x00080, 1 }, { 0x00090, 1 }, { 0x00100, 0 },
+                    /* The MONGOLIAN FREE VARIATION SELECTORs. */
+                    { 0x0180B, 1 }, { 0x01900, 0 },
+                    /* ZERO WIDTH NON-JOINER through RIGHT-TO-LEFT MARK. */
+                    { 0x0200C, 1 }, { 0x02010, 0 },
+                    /* The bidirectional formatting characters. */
+                    { 0x0202A, 1 }, { 0x02030, 0 },
+                    /* WORD JOINER and the invisible operators. */
+                    { 0x02060, 1 }, { 0x02064, 0 },
+                    /* INHIBIT SYMMETRIC SWAPPING through NOMINAL DIGIT
+                     * SHAPES. */
+                    { 0x0206A, 1 }, { 0x02100, 0 },
+                    /* The VARIATION SELECTORs. */
+                    { 0x0FE00, 1 }, { 0x0FE10, 0 },
+                    /* The interlinear annotation characters. */
+                    { 0x0FFF9, 1 }, { 0x0FFFD, 0 },
+                    /* The musical symbol combining stems. */
+                    { 0x1D173, 1 }, { 0x1D180, 0 },
+                    /* The deprecated tag characters. */
+                    { 0xE0020, 1 }, { 0xE0080, 0 }
+                };
+                byte probe[32];
+                int  p;
+
+                for (p = 0; p < (int)(sizeof(probes) / sizeof(probes[0]));
+                        p++) {
+                    DirTestAttr nm[1];
+
+                    nm[0].oid   = DIR_OID_O;
+                    nm[0].tag   = ASN_UTF8STRING;
+                    nm[0].val   = probe;
+                    nm[0].valSz = dirUtf8Probe(probe, probes[p].cp);
+                    ExpectIntEQ(dirMatch(nm, 1, bForbidden, 1),
+                                probes[p].drops);
+                }
+            }
+        }
+
+        /* A UTF-16 surrogate pair in a BMPString is one code point, and is
+         * the same character as the one the UTF-8 spelling holds. */
+        {
+            /* U+10000 as a surrogate pair and as UTF-8. */
+            static const byte astralBmp[]  = { 0xd8, 0x00, 0xdc, 0x00 };
+            static const byte astralUtf8[] = { 0xf0, 0x90, 0x80, 0x80 };
+            const DirTestAttr nm[] = {
+                { DIR_OID_O, ASN_BMPSTRING, astralBmp, sizeof(astralBmp) }
+            };
+            const DirTestAttr bs[] = {
+                { DIR_OID_O, ASN_UTF8STRING, astralUtf8, sizeof(astralUtf8) }
+            };
+            ExpectIntEQ(dirMatch(nm, 1, bs, 1), 1);
+        }
+        /* A code unit just above the surrogate block is an ordinary
+         * character in both of the wide string types. */
+        {
+            /* U+E000, the first Private Use character. */
+            static const byte puaBmp[] = { 0xe0, 0x00 };
+            static const byte puaUcs[] = { 0x00, 0x00, 0xe0, 0x00 };
+            const DirTestAttr nmBmp[] = {
+                { DIR_OID_O, ASN_BMPSTRING, puaBmp, sizeof(puaBmp) }
+            };
+            const DirTestAttr nmUcs[] = {
+                { DIR_OID_O, ASN_UNIVERSALSTRING, puaUcs, sizeof(puaUcs) }
+            };
+            ExpectIntEQ(dirMatch(nmBmp, 1, bForbidden, 1), 0);
+            ExpectIntEQ(dirMatch(nmUcs, 1, bForbidden, 1), 0);
+        }
+        /* Case folding covers the ASCII letters and leaves everything below
+         * them alone. */
+        {
+            static const byte forbid1[]   = { 'F','o','r','b','i','d','1' };
+            static const byte forbid1Up[] = { 'F','O','R','B','I','D','1' };
+            const DirTestAttr nm[] = {
+                { DIR_OID_O, ASN_UTF8STRING, forbid1Up, sizeof(forbid1Up) }
+            };
+            const DirTestAttr bs[] = {
+                { DIR_OID_O, ASN_UTF8STRING, forbid1, sizeof(forbid1) }
+            };
+            ExpectIntEQ(dirMatch(nm, 1, bs, 1), 1);
+        }
+        /* A value that is not a character string type is compared octet for
+         * octet: the same octets under a different tag are a different
+         * value, and the string rules are not applied to either side. */
+        {
+            const DirTestAttr nm[] = {
+                { DIR_OID_O, ASN_OCTET_STRING, forbidden, sizeof(forbidden) }
+            };
+            const DirTestAttr up[] = {
+                { DIR_OID_O, ASN_OCTET_STRING, forbiddenUp,
+                  sizeof(forbiddenUp) }
+            };
+            ExpectIntEQ(dirMatch(nm, 1, bForbidden, 1), 0);
+            ExpectIntEQ(dirMatch(bForbidden, 1, nm, 1), 0);
+            ExpectIntEQ(dirMatch(nm, 1, nm, 1), 1);
+            ExpectIntEQ(dirMatch(nm, 1, up, 1), 0);
         }
 
         /* Negative tests - should NOT match */
@@ -1443,10 +1634,16 @@ int test_wolfssl_local_MatchBaseName(void)
             static const byte loneHiBmp[] = { 0xd8, 0x00, 0x00, 'F' };
             /* BMPString low surrogate with no high surrogate before it. */
             static const byte loneLoBmp[] = { 0xdc, 0x00, 0x00, 'F' };
+            /* BMPString high surrogate followed by a code unit that is not
+             * a low surrogate. */
+            static const byte hiThenPua[] = { 0xd8, 0x00, 0xe0, 0x00 };
             /* UniversalString with a length that is not a multiple of 4. */
             static const byte shortUcs[]  = { 0x00, 0x00, 0x00 };
             /* UniversalString code point past the end of Unicode. */
             static const byte bigUcs[]    = { 0x00, 0x11, 0x00, 0x00 };
+            /* UniversalString holding a surrogate code point, which is not
+             * a character. */
+            static const byte surrUcs[]   = { 0x00, 0x00, 0xd8, 0x00 };
             static const struct {
                 byte        tag;
                 const byte* val;
@@ -1458,8 +1655,10 @@ int test_wolfssl_local_MatchBaseName(void)
                 { ASN_BMPSTRING,       oddBmp,    sizeof(oddBmp)    },
                 { ASN_BMPSTRING,       loneHiBmp, sizeof(loneHiBmp) },
                 { ASN_BMPSTRING,       loneLoBmp, sizeof(loneLoBmp) },
+                { ASN_BMPSTRING,       hiThenPua, sizeof(hiThenPua) },
                 { ASN_UNIVERSALSTRING, shortUcs,  sizeof(shortUcs)  },
-                { ASN_UNIVERSALSTRING, bigUcs,    sizeof(bigUcs)    }
+                { ASN_UNIVERSALSTRING, bigUcs,    sizeof(bigUcs)    },
+                { ASN_UNIVERSALSTRING, surrUcs,   sizeof(surrUcs)   }
             };
             int i;
 
@@ -2131,6 +2330,91 @@ int test_DecodeCertExtensions_dup_certpol(void)
     return EXPECT_RESULT();
 }
 
+/* RFC 5280 4.2.1.4 defines certificatePolicies as SEQUENCE SIZE (1..MAX) OF
+ * PolicyInformation, so an empty SEQUENCE must be rejected instead of being
+ * accepted as zero policies. */
+int test_DecodeCertExtensions_empty_certpol(void)
+{
+    EXPECT_DECLS;
+#if (defined(WOLFSSL_SEP) || defined(WOLFSSL_CERT_EXT)) && \
+    !defined(NO_CERTS) && !defined(NO_ASN)
+    /* certificatePolicies extnValue carrying no PolicyInformation. */
+    static const byte emptyPolicy[] = {
+        0x30, 0x00                          /* certificatePolicies SEQUENCE */
+    };
+    DecodedCert cert;
+    int isUnknown = 0;
+
+    wc_InitDecodedCert(&cert, emptyPolicy, (word32)sizeof(emptyPolicy), NULL);
+
+    ExpectIntEQ(DecodeExtensionType(emptyPolicy, (word32)sizeof(emptyPolicy),
+        CERT_POLICY_OID, 0, &cert, &isUnknown),
+        WC_NO_ERR_TRACE(ASN_PARSE_E));
+
+    wc_FreeDecodedCert(&cert);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* Trailing bytes after the last PolicyInformation must be rejected rather than
+ * skipped. */
+int test_DecodeCertExtensions_certpol_trailing_junk(void)
+{
+    EXPECT_DECLS;
+#if (defined(WOLFSSL_SEP) || defined(WOLFSSL_CERT_EXT)) && \
+    !defined(NO_CERTS) && !defined(NO_ASN)
+    /* One valid PolicyInformation followed by two bytes that are not one. */
+    static const byte trailingJunk[] = {
+        0x30, 0x09,                          /* certificatePolicies SEQUENCE */
+            0x30, 0x05,                      /* PolicyInformation SEQUENCE */
+                0x06, 0x03, 0x2A, 0x03, 0x04,/* policyIdentifier OID 1.2.3.4 */
+            0x00, 0x00                       /* trailing junk */
+    };
+    DecodedCert cert;
+    int isUnknown = 0;
+
+    wc_InitDecodedCert(&cert, trailingJunk, (word32)sizeof(trailingJunk), NULL);
+
+    ExpectIntEQ(DecodeExtensionType(trailingJunk, (word32)sizeof(trailingJunk),
+        CERT_POLICY_OID, 0, &cert, &isUnknown),
+        WC_NO_ERR_TRACE(ASN_PARSE_E));
+
+    wc_FreeDecodedCert(&cert);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* An empty certificatePolicies SEQUENCE followed by extra bytes: the
+ * non-template decoder reads a PolicyInformation before testing the loop
+ * condition, so it parses those bytes past the SEQUENCE end and returns 0. */
+int test_DecodeCertExtensions_empty_certpol_trailing(void)
+{
+    EXPECT_DECLS;
+#if (defined(WOLFSSL_SEP) || defined(WOLFSSL_CERT_EXT)) && \
+    !defined(NO_CERTS) && !defined(NO_ASN)
+    static const byte emptyThenPolicy[] = {
+        0x30, 0x00,                          /* certificatePolicies SEQUENCE */
+        0x30, 0x05,                          /* bytes after the SEQUENCE */
+            0x06, 0x03, 0x2A, 0x03, 0x04     /* OID 1.2.3.4 */
+    };
+    DecodedCert cert;
+    int isUnknown = 0;
+
+    wc_InitDecodedCert(&cert, emptyThenPolicy, (word32)sizeof(emptyThenPolicy),
+        NULL);
+
+    ExpectIntEQ(DecodeExtensionType(emptyThenPolicy,
+        (word32)sizeof(emptyThenPolicy), CERT_POLICY_OID, 0, &cert, &isUnknown),
+        WC_NO_ERR_TRACE(ASN_PARSE_E));
+#ifdef WOLFSSL_CERT_EXT
+    ExpectIntEQ(cert.extCertPoliciesNb, 0);
+#endif
+
+    wc_FreeDecodedCert(&cert);
+#endif
+    return EXPECT_RESULT();
+}
+
 int test_ParseCert_SM3wSM2_short_pubkey(void)
 {
     EXPECT_DECLS;
@@ -2791,7 +3075,7 @@ int test_ToTraditional_ex_roundtrip(void)
      defined(OPENSSL_EXTRA_X509_SMALL) || defined(WOLFSSL_PUBLIC_ASN))
 
 #if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_EXPORT) && \
-    defined(WOLFSSL_KEY_GEN)
+    defined(WOLFSSL_KEY_GEN) && defined(HAVE_ED25519_MAKE_KEY)
     {
         ed25519_key key;
         WC_RNG rng;
@@ -2818,7 +3102,8 @@ int test_ToTraditional_ex_roundtrip(void)
         wc_ed25519_free(&key);
         wc_FreeRng(&rng);
     }
-#endif /* HAVE_ED25519 */
+#endif /* HAVE_ED25519 && HAVE_ED25519_KEY_EXPORT && WOLFSSL_KEY_GEN &&
+          HAVE_ED25519_MAKE_KEY */
 
 #if defined(HAVE_ED448) && defined(HAVE_ED448_KEY_EXPORT) && \
     defined(WOLFSSL_KEY_GEN)
@@ -2921,8 +3206,8 @@ int test_ToTraditional_ex_negative(void)
 {
     EXPECT_DECLS;
 #if defined(HAVE_PKCS8) && defined(HAVE_ED25519) && \
-    defined(HAVE_ED25519_KEY_EXPORT) && defined(WOLFSSL_KEY_GEN) && \
-    defined(WOLFSSL_ASN_TEMPLATE) && \
+    defined(HAVE_ED25519_KEY_EXPORT) && defined(HAVE_ED25519_MAKE_KEY) && \
+    defined(WOLFSSL_KEY_GEN) && defined(WOLFSSL_ASN_TEMPLATE) && \
     (defined(WOLFSSL_TEST_CERT) || defined(OPENSSL_EXTRA) || \
      defined(OPENSSL_EXTRA_X509_SMALL) || defined(WOLFSSL_PUBLIC_ASN))
     ed25519_key key;
@@ -3262,6 +3547,141 @@ int test_wc_DecodeKeyUsage_decipherOnly(void)
     if (rngInit) wc_FreeRng(&rng);
     XFREE(der, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
 #endif /* TEST_KEYUSAGE_DECIPHER_ONLY */
+    return EXPECT_RESULT();
+}
+
+#if defined(WOLFSSL_WOLFSSH) && !defined(NO_ASN) && !defined(NO_CERTS) && \
+    defined(HAVE_ECC) && !defined(NO_ECC256) && !defined(NO_SHA256)
+    #define TEST_EXTKEYUSAGE_SSH
+#endif
+
+/*
+ * id-kp-secureShellClient and id-kp-secureShellServer (RFC 6187) are decoded
+ * into extExtKeyUsageSsh, not extExtKeyUsage. Parse a self-signed P-256 cert
+ * whose only key purposes are those two and check both bits land.
+ */
+int test_wc_DecodeExtKeyUsage_ssh(void)
+{
+    EXPECT_DECLS;
+#ifdef TEST_EXTKEYUSAGE_SSH
+    static const unsigned char sshEkuCert[] = {
+  0x30, 0x82, 0x01, 0x89, 0x30, 0x82, 0x01, 0x2f, 0xa0, 0x03, 0x02, 0x01,
+  0x02, 0x02, 0x09, 0x00, 0xc3, 0xf3, 0x13, 0xd2, 0x5f, 0x80, 0x6d, 0xd6,
+  0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+  0x30, 0x31, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13,
+  0x02, 0x55, 0x53, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x0a,
+  0x0c, 0x07, 0x77, 0x6f, 0x6c, 0x66, 0x53, 0x53, 0x4c, 0x31, 0x10, 0x30,
+  0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x73, 0x73, 0x68, 0x2d,
+  0x65, 0x6b, 0x75, 0x30, 0x20, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x30,
+  0x33, 0x30, 0x34, 0x35, 0x34, 0x34, 0x36, 0x5a, 0x18, 0x0f, 0x32, 0x31,
+  0x32, 0x36, 0x30, 0x38, 0x31, 0x30, 0x30, 0x34, 0x35, 0x34, 0x34, 0x36,
+  0x5a, 0x30, 0x31, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06,
+  0x13, 0x02, 0x55, 0x53, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04,
+  0x0a, 0x0c, 0x07, 0x77, 0x6f, 0x6c, 0x66, 0x53, 0x53, 0x4c, 0x31, 0x10,
+  0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x07, 0x73, 0x73, 0x68,
+  0x2d, 0x65, 0x6b, 0x75, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86,
+  0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
+  0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xfe, 0x1b, 0x76, 0x35, 0xdc,
+  0x20, 0x18, 0xc2, 0x9c, 0x30, 0x2f, 0xa7, 0x69, 0x7c, 0x9b, 0xe6, 0x9a,
+  0x70, 0x8f, 0x90, 0x20, 0xa2, 0xbb, 0xbe, 0xa4, 0xef, 0x46, 0xba, 0x87,
+  0x96, 0xfd, 0xfd, 0x93, 0xee, 0xf5, 0x9f, 0xc9, 0x89, 0x91, 0xaf, 0xf8,
+  0xa5, 0xd3, 0x00, 0xad, 0x27, 0xc3, 0x65, 0x0d, 0xe2, 0xc3, 0x62, 0x62,
+  0x9a, 0x31, 0x85, 0x5c, 0xa2, 0xcf, 0x18, 0x4d, 0xd9, 0x03, 0x65, 0xa3,
+  0x2e, 0x30, 0x2c, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x25, 0x04, 0x16,
+  0x30, 0x14, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x15,
+  0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x16, 0x30, 0x0b,
+  0x06, 0x03, 0x55, 0x1d, 0x0f, 0x04, 0x04, 0x03, 0x02, 0x07, 0x80, 0x30,
+  0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03,
+  0x48, 0x00, 0x30, 0x45, 0x02, 0x20, 0x09, 0x48, 0xa1, 0x88, 0x7e, 0x11,
+  0xa4, 0x70, 0x95, 0x79, 0x4b, 0x61, 0x8f, 0x37, 0xd8, 0x21, 0xa4, 0xe0,
+  0x4c, 0x63, 0xe6, 0x5e, 0xc2, 0x7b, 0x90, 0x5e, 0xc0, 0x7f, 0xee, 0x72,
+  0x76, 0x1b, 0x02, 0x21, 0x00, 0xad, 0x2b, 0x74, 0x14, 0xc4, 0x57, 0xbc,
+  0xbe, 0x46, 0x6b, 0x7f, 0x25, 0x90, 0x79, 0xe0, 0x82, 0xbb, 0x69, 0x43,
+  0x0b, 0x99, 0xbd, 0x75, 0xd3, 0x4d, 0x8c, 0x8d, 0x2c, 0x9e, 0x50, 0x69,
+  0x9e
+    };
+    DecodedCert cert;
+
+    wc_InitDecodedCert(&cert, sshEkuCert, (word32)sizeof(sshEkuCert), NULL);
+    ExpectIntEQ(wc_ParseCert(&cert, CERT_TYPE, NO_VERIFY, NULL), 0);
+    ExpectIntEQ(cert.extExtKeyUsageSet, 1);
+    ExpectIntEQ(cert.extExtKeyUsage, 0);
+    ExpectIntEQ(cert.extExtKeyUsageSsh,
+        EXTKEYUSE_SSH_CLIENT_AUTH | EXTKEYUSE_SSH_SERVER_AUTH);
+    wc_FreeDecodedCert(&cert);
+#endif /* TEST_EXTKEYUSAGE_SSH */
+    return EXPECT_RESULT();
+}
+
+/*
+ * The OID sum used to identify a KeyPurposeId is a checksum and can collide.
+ * With the default sum, appending the arc 16256 (encoded as ff 00) to an
+ * 8 byte OID leaves the sum unchanged, so 1.3.6.1.5.5.7.3.22.16256 sums the
+ * same as id-kp-secureShellServer and 1.3.6.1.5.5.7.3.1.16256 the same as
+ * id-kp-serverAuth. With WOLFSSL_OLD_OID_SUM (a byte sum) swapping the last
+ * two arcs does the same: 1.3.6.1.5.5.7.22.3 and 1.3.6.1.5.5.7.1.3.
+ * Parse a self-signed P-256 cert with key purposes id-kp-secureShellClient
+ * plus those four colliding OIDs and check that only the byte-exact OID sets
+ * a bit.
+ */
+int test_wc_DecodeExtKeyUsage_ssh_oid_collision(void)
+{
+    EXPECT_DECLS;
+#ifdef TEST_EXTKEYUSAGE_SSH
+    static const unsigned char sshEkuCollideCert[] = {
+  0x30, 0x82, 0x01, 0xb9, 0x30, 0x82, 0x01, 0x60, 0xa0, 0x03, 0x02, 0x01,
+  0x02, 0x02, 0x08, 0x7f, 0x1c, 0x2e, 0x3d, 0x4a, 0x5b, 0x6c, 0x7d, 0x30,
+  0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x30,
+  0x39, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02,
+  0x55, 0x53, 0x31, 0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c,
+  0x07, 0x77, 0x6f, 0x6c, 0x66, 0x53, 0x53, 0x4c, 0x31, 0x18, 0x30, 0x16,
+  0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x0f, 0x73, 0x73, 0x68, 0x2d, 0x65,
+  0x6b, 0x75, 0x2d, 0x63, 0x6f, 0x6c, 0x6c, 0x69, 0x64, 0x65, 0x30, 0x20,
+  0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x30, 0x33, 0x31, 0x39, 0x33, 0x37,
+  0x32, 0x33, 0x5a, 0x18, 0x0f, 0x32, 0x31, 0x32, 0x36, 0x30, 0x38, 0x31,
+  0x30, 0x31, 0x39, 0x33, 0x37, 0x32, 0x33, 0x5a, 0x30, 0x39, 0x31, 0x0b,
+  0x30, 0x09, 0x06, 0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x55, 0x53, 0x31,
+  0x10, 0x30, 0x0e, 0x06, 0x03, 0x55, 0x04, 0x0a, 0x0c, 0x07, 0x77, 0x6f,
+  0x6c, 0x66, 0x53, 0x53, 0x4c, 0x31, 0x18, 0x30, 0x16, 0x06, 0x03, 0x55,
+  0x04, 0x03, 0x0c, 0x0f, 0x73, 0x73, 0x68, 0x2d, 0x65, 0x6b, 0x75, 0x2d,
+  0x63, 0x6f, 0x6c, 0x6c, 0x69, 0x64, 0x65, 0x30, 0x59, 0x30, 0x13, 0x06,
+  0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86,
+  0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x68, 0xa5,
+  0x0e, 0x32, 0xbe, 0x32, 0xad, 0xad, 0xe9, 0x6a, 0xdb, 0x42, 0x0a, 0x96,
+  0xfc, 0xaa, 0xd6, 0x5c, 0xe2, 0x40, 0x5f, 0x39, 0xfb, 0xc9, 0xce, 0x4a,
+  0xfe, 0xe0, 0xe8, 0xae, 0x12, 0x9b, 0x1d, 0x56, 0x0c, 0x88, 0x30, 0x7f,
+  0x8a, 0x7f, 0xd7, 0x94, 0x54, 0x76, 0x9f, 0x73, 0x5c, 0x0f, 0x37, 0x06,
+  0x66, 0xab, 0xfa, 0xf7, 0x71, 0x3a, 0x11, 0x86, 0x58, 0x3b, 0x85, 0x12,
+  0x5f, 0x3d, 0xa3, 0x50, 0x30, 0x4e, 0x30, 0x3f, 0x06, 0x03, 0x55, 0x1d,
+  0x25, 0x04, 0x38, 0x30, 0x36, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05,
+  0x07, 0x03, 0x15, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03,
+  0x16, 0xff, 0x00, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x16,
+  0x03, 0x06, 0x0a, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01, 0xff,
+  0x00, 0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x03, 0x30,
+  0x0b, 0x06, 0x03, 0x55, 0x1d, 0x0f, 0x04, 0x04, 0x03, 0x02, 0x07, 0x80,
+  0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+  0x03, 0x47, 0x00, 0x30, 0x44, 0x02, 0x20, 0x01, 0xab, 0x08, 0xf9, 0xf0,
+  0xe5, 0x0e, 0x47, 0x1e, 0x68, 0xb8, 0xce, 0x16, 0x94, 0x2f, 0x8f, 0xfc,
+  0x6c, 0x95, 0x32, 0xd0, 0x5d, 0x60, 0x54, 0x18, 0xf5, 0x84, 0x67, 0x4f,
+  0x0c, 0xbd, 0x93, 0x02, 0x20, 0x1c, 0x29, 0x80, 0x00, 0x6f, 0xf6, 0x19,
+  0x66, 0x25, 0x35, 0x81, 0x38, 0x91, 0x6e, 0xb9, 0xaa, 0x80, 0xb8, 0x7a,
+  0x3b, 0xab, 0x20, 0x89, 0x1d, 0x04, 0x05, 0x53, 0xa0, 0x5e, 0xf2, 0xe6,
+  0xa9
+    };
+    DecodedCert cert;
+
+    wc_InitDecodedCert(&cert, sshEkuCollideCert,
+        (word32)sizeof(sshEkuCollideCert), NULL);
+    ExpectIntEQ(wc_ParseCert(&cert, CERT_TYPE, NO_VERIFY, NULL), 0);
+    ExpectIntEQ(cert.extExtKeyUsageSet, 1);
+    /* 1.3.6.1.5.5.7.3.1.16256 and 1.3.6.1.5.5.7.1.3 must not be taken for
+     * id-kp-serverAuth. */
+    ExpectIntEQ(cert.extExtKeyUsage, 0);
+    /* 1.3.6.1.5.5.7.3.22.16256 and 1.3.6.1.5.5.7.22.3 must not be taken for
+     * id-kp-secureShellServer. */
+    ExpectIntEQ(cert.extExtKeyUsageSsh, EXTKEYUSE_SSH_CLIENT_AUTH);
+    wc_FreeDecodedCert(&cert);
+#endif /* TEST_EXTKEYUSAGE_SSH */
     return EXPECT_RESULT();
 }
 

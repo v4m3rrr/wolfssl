@@ -387,6 +387,9 @@ function(generate_build_flags)
     if(WOLFSSL_ASCON OR WOLFSSL_USER_SETTINGS)
         set(BUILD_ASCON "yes" PARENT_SCOPE)
     endif()
+    if(WOLFSSL_ARGON2 OR WOLFSSL_USER_SETTINGS)
+        set(BUILD_ARGON2 "yes" PARENT_SCOPE)
+    endif()
     if(WOLFSSL_SM2 OR WOLFSSL_USER_SETTINGS)
         set(BUILD_SM2 "yes" PARENT_SCOPE)
     endif()
@@ -465,6 +468,10 @@ function(generate_lib_src_list LIB_SOURCES)
 
             if(BUILD_AESNI)
                 list(APPEND LIB_SOURCES wolfcrypt/src/aes_asm.S)
+                # 32-bit x86 AES-XTS. The file guards its own contents on
+                # WOLFSSL_AES_XTS and WOLFSSL_X86_BUILD, so it compiles to
+                # nothing on any other target or without XTS.
+                list(APPEND LIB_SOURCES wolfcrypt/src/aes_xts_x86_asm.S)
 
                 if(BUILD_INTELASM)
                     list(APPEND LIB_SOURCES wolfcrypt/src/aes_gcm_asm.S)
@@ -909,9 +916,13 @@ function(generate_lib_src_list LIB_SOURCES)
         endif()
 
         if(NOT BUILD_FIPS_V2 AND BUILD_AESNI)
+            # aes_xts_x86_asm.S guards its own contents on WOLFSSL_AES_XTS and
+            # WOLFSSL_X86_BUILD, so it compiles to nothing on any other target
+            # or without XTS.
             list(APPEND LIB_SOURCES
                 wolfcrypt/src/aes_asm.S
-                wolfcrypt/src/aes_gcm_asm.S)
+                wolfcrypt/src/aes_gcm_asm.S
+                wolfcrypt/src/aes_xts_x86_asm.S)
         endif()
 
         if(BUILD_CAMELLIA)
@@ -940,6 +951,10 @@ function(generate_lib_src_list LIB_SOURCES)
 
         if(BUILD_ASCON)
             list(APPEND LIB_SOURCES wolfcrypt/src/ascon.c)
+        endif()
+
+        if(BUILD_ARGON2)
+            list(APPEND LIB_SOURCES wolfcrypt/src/argon2.c)
         endif()
 
         # ShangMi SM2/SM3/SM4. The implementation files are provided by the
@@ -1281,6 +1296,9 @@ function(generate_lib_src_list LIB_SOURCES)
     # Corresponds to wolfcrypt/src/include.am
     if(BUILD_CRYPTOCB)
         list(APPEND LIB_SOURCES wolfcrypt/src/cryptocb.c)
+        # entirely #ifdef WOLF_CRYPTO_CB_KEYSTORE, so it costs nothing when the
+        # key store facility is not enabled
+        list(APPEND LIB_SOURCES wolfcrypt/src/wc_keystore.c)
     endif()
 
     if(BUILD_SHE)

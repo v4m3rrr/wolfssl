@@ -41,7 +41,19 @@ IFNDEF _WIN64
 _WIN64 = 1
 ENDIF
 
+fips_version = 0
+IFDEF HAVE_FIPS
+  fips_version = 1
+  IFDEF HAVE_FIPS_VERSION
+    fips_version = HAVE_FIPS_VERSION
+  ENDIF
+ENDIF
+
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_init_aesni PROC
         movdqu	xmm0, OWORD PTR [rcx]
         ; aes_enc_block
@@ -82,13 +94,31 @@ L_AES_XTS_init_aesni_tweak_aes_enc_block_last:
         movdqu	OWORD PTR [rcx], xmm0
         ret
 AES_XTS_init_aesni ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_aes_xts_gc_xts DWORD 00000087h, 00000001h, 00000001h, 00000001h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_aes_xts_gc_xts QWORD L_aes_xts_gc_xts
 _DATA ENDS
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_aesni PROC
         push	rdi
         push	rsi
@@ -420,8 +450,16 @@ L_AES_XTS_encrypt_aesni_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_aesni ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_update_aesni PROC
         push	rdi
         push	rsi
@@ -716,8 +754,16 @@ L_AES_XTS_encrypt_update_aesni_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_update_aesni ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_aesni PROC
         push	rdi
         push	rsi
@@ -1103,8 +1149,16 @@ L_AES_XTS_decrypt_aesni_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_aesni ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_update_aesni PROC
         push	rdi
         push	rsi
@@ -1453,9 +1507,17 @@ L_AES_XTS_decrypt_update_aesni_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_update_aesni ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
 IFDEF HAVE_INTEL_AVX1
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_init_avx1 PROC
         vmovdqu	xmm0, OWORD PTR [rcx]
         ; aes_enc_block
@@ -1496,13 +1558,31 @@ L_AES_XTS_init_avx1_tweak_aes_enc_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
         ret
 AES_XTS_init_avx1 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_avx1_aes_xts_gc_xts DWORD 00000087h, 00000001h, 00000001h, 00000001h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_avx1_aes_xts_gc_xts QWORD L_avx1_aes_xts_gc_xts
 _DATA ENDS
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_avx1 PROC
         push	rdi
         push	rsi
@@ -1825,8 +1905,16 @@ L_AES_XTS_encrypt_avx1_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_avx1 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_update_avx1 PROC
         push	rdi
         push	rsi
@@ -2112,8 +2200,16 @@ L_AES_XTS_encrypt_update_avx1_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_update_avx1 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_avx1 PROC
         push	rdi
         push	rsi
@@ -2488,8 +2584,16 @@ L_AES_XTS_decrypt_avx1_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_avx1 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_update_avx1 PROC
         push	rdi
         push	rsi
@@ -2827,10 +2931,18 @@ L_AES_XTS_decrypt_update_avx1_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_update_avx1 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
 ENDIF
+ENDIF
 IFDEF HAVE_INTEL_VAES
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_init_vaes PROC
         vmovdqu	xmm0, OWORD PTR [rcx]
         ; aes_enc_block
@@ -2871,30 +2983,78 @@ L_AES_XTS_init_vaes_tweak_aes_enc_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
         ret
 AES_XTS_init_vaes ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_vaes_aes_xts_gc_xts DWORD 00000087h, 00000000h, 00000001h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_vaes_aes_xts_gc_xts QWORD L_vaes_aes_xts_gc_xts
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_vaes_aes_xts_poly DWORD 00000087h, 00000000h, 00000000h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_vaes_aes_xts_poly QWORD L_vaes_aes_xts_poly
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_vaes_aes_xts_shl DWORD 00000000h, 00000000h, 00000000h, 00000000h
         DWORD 00000001h, 00000000h, 00000001h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_vaes_aes_xts_shl QWORD L_vaes_aes_xts_shl
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_vaes_aes_xts_shr DWORD 00000040h, 00000000h, 00000040h, 00000000h
         DWORD 0000003fh, 00000000h, 0000003fh, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_vaes_aes_xts_shr QWORD L_vaes_aes_xts_shr
 _DATA ENDS
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_vaes PROC
         push	rdi
         push	rsi
@@ -3392,6 +3552,7 @@ L_AES_XTS_encrypt_vaes_last_15_aes_enc_block_last:
         lea	rcx, QWORD PTR [rsi+r13]
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_encrypt_vaes_done_enc:
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+72]
         vmovdqu	xmm7, OWORD PTR [rsp+88]
         vmovdqu	xmm8, OWORD PTR [rsp+104]
@@ -3409,8 +3570,16 @@ L_AES_XTS_encrypt_vaes_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_vaes ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_update_vaes PROC
         push	rdi
         push	rsi
@@ -3872,6 +4041,7 @@ L_AES_XTS_encrypt_update_vaes_last_15_aes_enc_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_encrypt_update_vaes_done_enc:
         vmovdqu	OWORD PTR [r8], xmm8
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+64]
         vmovdqu	xmm7, OWORD PTR [rsp+80]
         vmovdqu	xmm8, OWORD PTR [rsp+96]
@@ -3888,8 +4058,16 @@ L_AES_XTS_encrypt_update_vaes_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_update_vaes ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_vaes PROC
         push	rdi
         push	rsi
@@ -4461,6 +4639,7 @@ L_AES_XTS_decrypt_vaes_last_31_2_aes_dec_block_last:
         lea	rcx, QWORD PTR [rsi+r13]
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_decrypt_vaes_done_dec:
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+72]
         vmovdqu	xmm7, OWORD PTR [rsp+88]
         vmovdqu	xmm8, OWORD PTR [rsp+104]
@@ -4478,8 +4657,16 @@ L_AES_XTS_decrypt_vaes_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_vaes ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_update_vaes PROC
         push	rdi
         push	rsi
@@ -5015,6 +5202,7 @@ L_AES_XTS_decrypt_update_vaes_last_31_2_aes_dec_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_decrypt_update_vaes_done_dec:
         vmovdqu	OWORD PTR [r8], xmm8
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+64]
         vmovdqu	xmm7, OWORD PTR [rsp+80]
         vmovdqu	xmm8, OWORD PTR [rsp+96]
@@ -5031,10 +5219,18 @@ L_AES_XTS_decrypt_update_vaes_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_update_vaes ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
 ENDIF
+ENDIF
 IFDEF HAVE_INTEL_AVX512
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_init_avx512 PROC
         vmovdqu	xmm0, OWORD PTR [rcx]
         ; aes_enc_block
@@ -5075,34 +5271,82 @@ L_AES_XTS_init_avx512_tweak_aes_enc_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
         ret
 AES_XTS_init_avx512 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_avx512_aes_xts_gc_xts DWORD 00000087h, 00000000h, 00000001h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_avx512_aes_xts_gc_xts QWORD L_avx512_aes_xts_gc_xts
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_avx512_aes_xts_poly DWORD 00000087h, 00000000h, 00000000h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_avx512_aes_xts_poly QWORD L_avx512_aes_xts_poly
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_avx512_aes_xts_shl DWORD 00000000h, 00000000h, 00000000h, 00000000h
         DWORD 00000001h, 00000000h, 00000001h, 00000000h
         DWORD 00000002h, 00000000h, 00000002h, 00000000h
         DWORD 00000003h, 00000000h, 00000003h, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_avx512_aes_xts_shl QWORD L_avx512_aes_xts_shl
 _DATA ENDS
+IF fips_version GE 7
+fipsBb SEGMENT READONLY ALIAS(".fipsB$b") 'CONST'
+ELSE
 _DATA SEGMENT
+ENDIF
 ALIGN 16
 L_avx512_aes_xts_shr DWORD 00000040h, 00000000h, 00000040h, 00000000h
         DWORD 0000003fh, 00000000h, 0000003fh, 00000000h
         DWORD 0000003eh, 00000000h, 0000003eh, 00000000h
         DWORD 0000003dh, 00000000h, 0000003dh, 00000000h
+IF fips_version GE 7
+fipsBb ENDS
+ELSE
+_DATA ENDS
+ENDIF
+_DATA SEGMENT
 ptr_L_avx512_aes_xts_shr QWORD L_avx512_aes_xts_shr
 _DATA ENDS
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_avx512 PROC
         push	rdi
         push	rsi
@@ -5607,6 +5851,7 @@ L_AES_XTS_encrypt_avx512_last_15_aes_enc_block_last:
         lea	rcx, QWORD PTR [rsi+r13]
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_encrypt_avx512_done_enc:
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+72]
         vmovdqu	xmm7, OWORD PTR [rsp+88]
         vmovdqu	xmm8, OWORD PTR [rsp+104]
@@ -5624,8 +5869,16 @@ L_AES_XTS_encrypt_avx512_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_avx512 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_encrypt_update_avx512 PROC
         push	rdi
         push	rsi
@@ -6094,6 +6347,7 @@ L_AES_XTS_encrypt_update_avx512_last_15_aes_enc_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_encrypt_update_avx512_done_enc:
         vmovdqu	OWORD PTR [r8], xmm8
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+64]
         vmovdqu	xmm7, OWORD PTR [rsp+80]
         vmovdqu	xmm8, OWORD PTR [rsp+96]
@@ -6110,8 +6364,16 @@ L_AES_XTS_encrypt_update_avx512_done_enc:
         pop	rdi
         ret
 AES_XTS_encrypt_update_avx512 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_avx512 PROC
         push	rdi
         push	rsi
@@ -6700,6 +6962,7 @@ L_AES_XTS_decrypt_avx512_last_31_2_aes_dec_block_last:
         lea	rcx, QWORD PTR [rsi+r13]
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_decrypt_avx512_done_dec:
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+72]
         vmovdqu	xmm7, OWORD PTR [rsp+88]
         vmovdqu	xmm8, OWORD PTR [rsp+104]
@@ -6717,8 +6980,16 @@ L_AES_XTS_decrypt_avx512_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_avx512 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
+IF fips_version GE 7
+fipsAb SEGMENT ALIAS(".fipsA$b") 'CODE'
+ELSE
 _TEXT SEGMENT READONLY PARA
+ENDIF
 AES_XTS_decrypt_update_avx512 PROC
         push	rdi
         push	rsi
@@ -7271,6 +7542,7 @@ L_AES_XTS_decrypt_update_avx512_last_31_2_aes_dec_block_last:
         vmovdqu	OWORD PTR [rcx], xmm0
 L_AES_XTS_decrypt_update_avx512_done_dec:
         vmovdqu	OWORD PTR [r8], xmm8
+        vzeroupper
         vmovdqu	xmm6, OWORD PTR [rsp+64]
         vmovdqu	xmm7, OWORD PTR [rsp+80]
         vmovdqu	xmm8, OWORD PTR [rsp+96]
@@ -7287,6 +7559,10 @@ L_AES_XTS_decrypt_update_avx512_done_dec:
         pop	rdi
         ret
 AES_XTS_decrypt_update_avx512 ENDP
+IF fips_version GE 7
+fipsAb ENDS
+ELSE
 _TEXT ENDS
+ENDIF
 ENDIF
 END

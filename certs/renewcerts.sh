@@ -15,6 +15,9 @@
 #                       server-cert.pem
 #                       server-cert.der
 #                       server-cert-chain.der
+#                       server-cert-sha1.pem
+#                       server-cert-sha1-root.pem
+#                       client-cert-sha1.pem
 #                       server-ecc-rsa.pem
 #                       server-ecc.pem
 #                       1024/client-cert.der
@@ -636,6 +639,70 @@ run_renewcerts(){
     echo "End of section"
     echo "---------------------------------------------------------------------"
     ###########################################################
+    ########## update and sign server-cert-sha1.pem ###########
+    ###########################################################
+    # SHA-1 signed leaf. Used by the TLS 1.3 tests that check a server does
+    # not send a SHA-1 signed chain to a peer that did not advertise SHA-1.
+    echo "Updating server-cert-sha1.pem"
+    echo ""
+    echo -e "US\\nMontana\\nBozeman\\nwolfSSL\\nSupport\\nwww.wolfssl.com\\nfacts@wolfssl.com\\n.\\n.\\n" | openssl req -new -key server-key.pem -config ./wolfssl.cnf -nodes > server-sha1-req.pem
+    check_result $? "Step 1"
+
+    openssl x509 -req -in server-sha1-req.pem -sha1 -extfile wolfssl.cnf -extensions wolfssl_opts -days 1000 -CA ca-cert.pem -CAkey ca-key.pem -set_serial 51 > server-sha1-tmp.pem
+    check_result $? "Step 2"
+
+    rm server-sha1-req.pem
+
+    openssl x509 -in server-sha1-tmp.pem -text > server-cert-sha1.pem
+    check_result $? "Step 3"
+    rm server-sha1-tmp.pem
+    echo "End of section"
+    echo "---------------------------------------------------------------------"
+    ###########################################################
+    ####### update and sign server-cert-sha1-root.pem #########
+    ###########################################################
+    # SHA-256 leaf with a self signed SHA-1 root appended. RFC 8446 4.4.2.2
+    # lets the trust anchor be omitted, so its SHA-1 signature must not stop
+    # the chain from being sent.
+    echo "Updating server-cert-sha1-root.pem"
+    echo ""
+    echo -e "US\\nMontana\\nBozeman\\nSawtooth\\nConsulting\\nwww.wolfssl.com\\nfacts@wolfssl.com\\n.\\n.\\n" | openssl req -new -key ca-key.pem -config ./wolfssl.cnf -nodes -out ca-sha1-req.pem
+    check_result $? "Step 1"
+
+    openssl x509 -req -in ca-sha1-req.pem -sha1 -days 1000 -extfile wolfssl.cnf -extensions wolfssl_opts -signkey ca-key.pem -set_serial 52 -out ca-sha1-tmp.pem
+    check_result $? "Step 2"
+
+    rm ca-sha1-req.pem
+
+    openssl x509 -in server-cert.pem -text > server-cert-sha1-root.pem
+    check_result $? "Step 3"
+    openssl x509 -in ca-sha1-tmp.pem -text >> server-cert-sha1-root.pem
+    check_result $? "Step 4"
+    rm ca-sha1-tmp.pem
+    echo "End of section"
+    echo "---------------------------------------------------------------------"
+    ###########################################################
+    ########## update and sign client-cert-sha1.pem ###########
+    ###########################################################
+    # SHA-1 signed client leaf, issued by ca-cert.pem rather than self signed
+    # so it is not exempt from the RFC 8446 4.4.2.2 trust anchor rule. Used to
+    # check the client falls back to an empty certificate_list.
+    echo "Updating client-cert-sha1.pem"
+    echo ""
+    echo -e "US\\nMontana\\nBozeman\\nwolfSSL_2048\\nProgramming-2048\\nwww.wolfssl.com\\nfacts@wolfssl.com\\n.\\n.\\n" | openssl req -new -key client-key.pem -config ./wolfssl.cnf -nodes > client-sha1-req.pem
+    check_result $? "Step 1"
+
+    openssl x509 -req -in client-sha1-req.pem -sha1 -extfile wolfssl.cnf -extensions wolfssl_opts -days 1000 -CA ca-cert.pem -CAkey ca-key.pem -set_serial 53 > client-sha1-tmp.pem
+    check_result $? "Step 2"
+
+    rm client-sha1-req.pem
+
+    openssl x509 -in client-sha1-tmp.pem -text > client-cert-sha1.pem
+    check_result $? "Step 3"
+    rm client-sha1-tmp.pem
+    echo "End of section"
+    echo "---------------------------------------------------------------------"
+    ###########################################################
     ########## update and sign server-revoked-key.pem #########
     ###########################################################
     echo "Updating server-revoked-cert.pem"
@@ -1189,9 +1256,9 @@ EOF
     ############################################################
     # ML-DSA requires an OpenSSL 3.5+ binary with the built-in ML-DSA provider.
     # Besides key/cert generation the block also produces the expanded-only
-    # PKCS#8 key.der (-provparam ml-dsa.output_formats=priv, a 3.5+ built-in
-    # construct) that the PKCS#7 tests decode without keygen-from-seed. The
-    # probe below requires both keygen and that conversion, so the common
+    # PKCS#8 key.der (-provparam ml-dsa.output_formats=priv-only, a 3.5+
+    # built-in construct) that the PKCS#7 tests decode without keygen-from-seed.
+    # The probe below requires both keygen and that conversion, so the common
     # unsuitable binaries (oqsprovider or pre-3.5, which lack the expanded-only
     # conversion) are rejected here and the block is skipped cleanly rather
     # than aborting after writing a cert.der but no matching key.der.
@@ -1218,7 +1285,7 @@ EOF
             if ! "$candidate" genpkey -algorithm "mldsa${probe_level}" \
                     -out "$probe_key" 2>/dev/null || \
                ! "$candidate" pkey -in "$probe_key" \
-                    -provparam ml-dsa.output_formats=priv -outform DER \
+                    -provparam ml-dsa.output_formats=priv-only -outform DER \
                     -out /dev/null 2>/dev/null; then
                 probe_ok=0
                 break
@@ -1261,7 +1328,7 @@ EOF
             # builds too; the seed-and-expanded default would not. The probe
             # above already verified this binary supports the conversion.
             "$OPENSSL3" pkey -in "mldsa/mldsa${level}-key.pem" \
-                -provparam ml-dsa.output_formats=priv -outform DER \
+                -provparam ml-dsa.output_formats=priv-only -outform DER \
                 -out "mldsa/mldsa${level}-key.der"
             check_result $? "ML-DSA-${level} key DER conversion"
 
@@ -1329,6 +1396,104 @@ EOF
         echo "---------------------------------------------------------------------"
     else
         echo "Skipping ML-DSA cert generation (no OpenSSL 3.5+ built-in ML-DSA provider found)"
+        echo "---------------------------------------------------------------------"
+    fi
+
+    ############################################################
+    #### ML-KEM (FIPS 203) key establishment certificates    ###
+    ############################################################
+    # ML-KEM is a KEM, so it cannot sign anything, including a certificate
+    # request or its own certificate. Each end-entity certificate here is
+    # issued by the ML-DSA-87 certificate produced above, per RFC 9935 and the
+    # CNSA 2.0 PKIX profile, using a throwaway request that only carries the
+    # subject name - "x509 -req -force_pubkey" replaces its public key with the
+    # ML-KEM one before signing. That request is signed by the ML-DSA-87 CA key
+    # itself, so no extra key material is needed.
+    #
+    # The private keys are written in the priv-only PKCS#8 shape (RFC 9935
+    # section 6 expandedKey), which decodes without keygen-from-seed and so
+    # works in WOLFSSL_MLKEM_NO_MAKE_KEY builds too. The seed-priv default
+    # would not.
+    #
+    # This needs the same OpenSSL 3.5+ binary as the ML-DSA block, plus its
+    # built-in ML-KEM provider, so it is probed separately: a binary with
+    # ML-DSA but no ML-KEM still produces the ML-DSA material above.
+    if [ -n "$OPENSSL3" ] && [ -f mldsa/mldsa87-cert.pem ]; then
+        mlkem_probe_key="$(mktemp)"
+        mlkem_ok=1
+        for probe_level in 512 768 1024; do
+            if ! "$OPENSSL3" genpkey -algorithm "ML-KEM-${probe_level}" \
+                    -out "$mlkem_probe_key" 2>/dev/null || \
+               ! "$OPENSSL3" pkey -in "$mlkem_probe_key" \
+                    -provparam ml-kem.output_formats=priv-only -outform DER \
+                    -out /dev/null 2>/dev/null; then
+                mlkem_ok=0
+                break
+            fi
+        done
+        rm -f "$mlkem_probe_key"
+    else
+        mlkem_ok=0
+    fi
+
+    if [ "$mlkem_ok" -eq 1 ]; then
+        echo "Generating ML-KEM certificates using: $OPENSSL3"
+        echo ""
+        mkdir -p mlkem
+
+        # CNSA 2.0 key establishment certificate: keyUsage critical, asserting
+        # keyEncipherment and nothing else (RFC 9935 section 5).
+        cat > mlkem/mlkem.ext <<EOF
+subjectKeyIdentifier = hash
+keyUsage = critical, keyEncipherment
+EOF
+
+        for level in 512 768 1024; do
+            echo "Generating ML-KEM-${level} key and certificate..."
+
+            "$OPENSSL3" genpkey -algorithm "ML-KEM-${level}" \
+                -out "mlkem/mlkem${level}-key.pem"
+            check_result $? "ML-KEM-${level} key generation"
+
+            "$OPENSSL3" pkey -in "mlkem/mlkem${level}-key.pem" -pubout \
+                -out "mlkem/mlkem${level}-pub.pem"
+            check_result $? "ML-KEM-${level} public key extraction"
+
+            # Carrier request. Its own public key is discarded below; only the
+            # subject name is kept.
+            "$OPENSSL3" req -new -key mldsa/mldsa87-key.pem \
+                -subj "/C=US/ST=Montana/L=Bozeman/O=wolfSSL/CN=ML-KEM-${level}" \
+                -out "mlkem/mlkem${level}.csr"
+            check_result $? "ML-KEM-${level} request"
+
+            "$OPENSSL3" x509 -req -in "mlkem/mlkem${level}.csr" \
+                -force_pubkey "mlkem/mlkem${level}-pub.pem" \
+                -CA mldsa/mldsa87-cert.pem -CAkey mldsa/mldsa87-key.pem \
+                -CAcreateserial -days 3650 -extfile mlkem/mlkem.ext \
+                -out "mlkem/mlkem${level}-cert.pem"
+            check_result $? "ML-KEM-${level} certificate generation"
+
+            "$OPENSSL3" x509 -in "mlkem/mlkem${level}-cert.pem" -outform DER \
+                -out "mlkem/mlkem${level}-cert.der"
+            check_result $? "ML-KEM-${level} DER conversion"
+
+            "$OPENSSL3" pkey -in "mlkem/mlkem${level}-key.pem" \
+                -provparam ml-kem.output_formats=priv-only -outform DER \
+                -out "mlkem/mlkem${level}-key.der"
+            check_result $? "ML-KEM-${level} key DER conversion"
+
+            # Only the DER files are kept under certs/mlkem; the PEM forms are
+            # intermediates.
+            rm -f "mlkem/mlkem${level}.csr" "mlkem/mlkem${level}-key.pem" \
+                  "mlkem/mlkem${level}-pub.pem" "mlkem/mlkem${level}-cert.pem"
+
+            echo "End of ML-KEM-${level} section"
+        done
+
+        rm -f mlkem/mlkem.ext mldsa/mldsa87-cert.srl
+        echo "---------------------------------------------------------------------"
+    else
+        echo "Skipping ML-KEM cert generation (no OpenSSL 3.5+ built-in ML-KEM provider found)"
         echo "---------------------------------------------------------------------"
     fi
 

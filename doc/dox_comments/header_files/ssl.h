@@ -2584,6 +2584,11 @@ int  wolfSSL_shutdown(WOLFSSL* ssl);
 
     \param ssl pointer to the SSL session, created with wolfSSL_new().
 
+    \note RFC 9846, Section 6.1 requires this alert to be followed by a
+    close notify, which is why the shutdown is part of this call. On the
+    receiving side the alert is not itself an error: a TLS 1.3 peer keeps
+    reading until the close notify arrives, whatever AlertLevel was used.
+
     _Example_
     \code
     int ret = 0;
@@ -3059,7 +3064,11 @@ int wolfSSL_GetSessionAtIndex(int index, WOLFSSL_SESSION* session);
     side. Server mode: the verification is the same as
     SSL_VERIFY_FAIL_IF_NO_PEER_CERT except in the case of a PSK connection.
     If a PSK connection is being made then the connection will go through
-    without a peer cert.
+    without a peer cert. SSL_VERIFY_CLIENT_ONCE Accepted and ignored. It is
+    present so that OpenSSL-derived code compiles unchanged; wolfSSL does not
+    act on it, does not store it, and wolfSSL_get_verify_mode() /
+    wolfSSL_CTX_get_verify_mode() will not report it back. Including it in
+    mode has no effect on any of the other flags.
 
     \return none No return.
 
@@ -3107,7 +3116,11 @@ void wolfSSL_CTX_set_verify(WOLFSSL_CTX* ctx, int mode,
     side. Server mode: the verification is the same as
     SSL_VERIFY_FAIL_IF_NO_PEER_CERT except in the case of a PSK connection.
     If a PSK connection is being made then the connection will go through
-    without a peer cert.
+    without a peer cert. SSL_VERIFY_CLIENT_ONCE Accepted and ignored. It is
+    present so that OpenSSL-derived code compiles unchanged; wolfSSL does not
+    act on it, does not store it, and wolfSSL_get_verify_mode() /
+    wolfSSL_CTX_get_verify_mode() will not report it back. Including it in
+    mode has no effect on any of the other flags.
 
     \return none No return.
 
@@ -3405,6 +3418,14 @@ int  wolfSSL_set_session_secret_cb(WOLFSSL* ssl, SessionSecretCb cb, void* ctx);
 
     \brief This function persists the session cache to file. It doesn’t use
     memsave because of additional memory use.
+
+    \warning The file holds session master secrets and resumption credentials
+    in the clear. On POSIX systems it is created with mode 0600; on other
+    platforms the permissions are whatever the port’s XFOPEN produces, so the
+    caller must place the file where only the intended user can read it.
+    An existing file is additionally tightened with fchmod, which fails on
+    filesystems without permission bits (FAT); define WOLFSSL_NO_FCHMOD to
+    skip that step on such targets.
 
     \return SSL_SUCCESS returned if the function executed without error.
     The session cache has been written to a file.
@@ -14770,6 +14791,13 @@ int  wolfSSL_require_psk(WOLFSSL* ssl);
 
     \return BAD_FUNC_ARG if ssl is NULL or not using TLS v1.3.
     \return WANT_WRITE if the writing is not ready.
+    \return BAD_STATE_E if the connection has already performed the maximum
+    number of key updates. RFC 9846, Section 4.7.3 caps a TLS 1.3 sender at
+    2^48-1 key updates; beyond that the connection must be closed rather than
+    rekeyed. Note that a KeyUpdate arriving from the peer with
+    request_update set is ignored once this cap is reached, rather than
+    failing the connection, so only an application-initiated update reports
+    this error.
     \return WOLFSSL_SUCCESS if successful.
 
     _Example_
@@ -14800,7 +14828,8 @@ int  wolfSSL_update_keys(WOLFSSL* ssl);
     is received.
 
     \param [in] ssl a pointer to a WOLFSSL structure, created using wolfSSL_new().
-    \param [out] required   0 when no key update response required. 1 when no key update response required.
+    \param [out] required   0 when no key update response is required. 1 when
+    a key update response from the peer is still outstanding.
 
     \return 0 on successful.
     \return BAD_FUNC_ARG if ssl is NULL or not using TLS v1.3.
@@ -15622,7 +15651,15 @@ int  wolfSSL_set_max_early_data(WOLFSSL* ssl, unsigned int sz);
     \return SIDE_ERROR if called with a server.
     \return BAD_STATE_E if invoked without a valid session or without a valid
     PSK cb
-    \return WOLFSSL_FATAL_ERROR if the connection is not made.
+    \return WOLFSSL_FATAL_ERROR if the connection is not made, or if the
+    AEAD key usage limit would be exceeded by this write, in which case
+    wolfSSL_get_error() reports TOO_MUCH_EARLY_DATA. A KeyUpdate cannot be
+    performed while sending early data (RFC 9846, Section 5.5), so no further
+    early data can be sent on this connection. The write is all-or-nothing as
+    usual: a value less than sz is never returned. Note that a failed call may
+    still have put records on the wire before the limit was reached, so treat
+    the connection as unusable for early data rather than resuming the send
+    from an offset.
     \return the amount of early data written in bytes if successful.
 
     _Example_
@@ -15708,6 +15745,48 @@ int  wolfSSL_write_early_data(WOLFSSL* ssl, const void* data,
 */
 int  wolfSSL_read_early_data(WOLFSSL* ssl, void* data, int sz,
     int* outSz);
+
+/*!
+    \ingroup Setup
+
+    \brief This function is called on the server to disable the
+    RFC 8446 Section 8.2 fresh start protection. By default a freshly
+    created context rejects early data, but not resumption, for session
+    tickets minted before the context was created, since the anti-replay
+    state for those tickets may not have survived a server restart. Only
+    call this function when the anti-replay state (session cache or
+    external cache) reliably survives server restarts.
+
+    The check compares the ticket timestamp against the context creation
+    time, both taken from TimeNowInMilliseconds(). That clock is only
+    required to be millisecond accurate, not correlated to the epoch, so on
+    ports where it counts from boot (Windows QPC, Zephyr, FreeRTOS, Micrium,
+    Microchip) it restarts near zero and the check does not fire for tickets
+    minted before a reboot. Such deployments must rely on ticket key
+    rotation instead.
+
+    \param [in,out] ctx a pointer to a WOLFSSL_CTX structure, created
+    with wolfSSL_CTX_new().
+
+    \return BAD_FUNC_ARG if ctx is NULL or not using TLS v1.3.
+    \return SIDE_ERROR if called with a client.
+    \return 0 if successful.
+
+    _Example_
+    \code
+    int ret;
+    WOLFSSL_CTX* ctx;
+    ...
+    ret = wolfSSL_CTX_no_early_data_fresh_start_check(ctx);
+    if (ret != 0) {
+        // failed to disable the fresh start check
+    }
+    \endcode
+
+    \sa wolfSSL_CTX_set_max_early_data
+    \sa wolfSSL_read_early_data
+*/
+int  wolfSSL_CTX_no_early_data_fresh_start_check(WOLFSSL_CTX* ctx);
 
 /*!
     \ingroup IO

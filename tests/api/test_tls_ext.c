@@ -1295,6 +1295,165 @@ int test_certificate_authorities_client_hello(void) {
     return EXPECT_RESULT();
 }
 
+/* Same rule as above, but for the CertificateRequest a server sends. This
+ * used to let the handshake succeed and leave the client holding a
+ * present-but-empty CA name list. */
+int test_certificate_authorities_empty_cert_request(void) {
+    EXPECT_DECLS;
+#if !defined(NO_WOLFSSL_CLIENT) && !defined(NO_WOLFSSL_SERVER) && \
+    !defined(WOLFSSL_NO_CA_NAMES) && !defined(NO_BIO) && \
+    !defined(NO_CERTS) && !defined(NO_TLS) && (defined(OPENSSL_EXTRA) || \
+    defined(OPENSSL_EXTRA_X509_SMALL)) && (defined(OPENSSL_ALL) || \
+    defined(WOLFSSL_NGINX) || defined(HAVE_LIGHTY)) && \
+    defined(WOLFSSL_TLS13) && defined(HAVE_MANUAL_MEMIO_TESTS_DEPENDENCIES)
+    struct test_memio_ctx test_ctx;
+    WOLFSSL_CTX *ctx_srv = NULL, *ctx_cli = NULL;
+    WOLFSSL *ssl_srv = NULL, *ssl_cli = NULL;
+    WOLF_STACK_OF(X509_NAME) *empty = NULL;
+    struct client_cb_arg cb_arg = { NULL, NULL };
+
+    XMEMSET(&test_ctx, 0, sizeof(test_ctx));
+
+    ExpectIntEQ(0, test_memio_setup(&test_ctx, &ctx_cli, &ctx_srv,
+                &ssl_cli, NULL, wolfTLSv1_3_client_method,
+                wolfTLSv1_3_server_method));
+
+    /* Ask the client for a certificate so the server sends a
+     * CertificateRequest. */
+    wolfSSL_CTX_set_verify(ctx_srv,
+            SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+    ExpectIntEQ(WOLFSSL_SUCCESS,
+            wolfSSL_CTX_load_verify_locations(ctx_srv, cliCertFile, NULL));
+
+    ExpectNotNull(ssl_srv = wolfSSL_new(ctx_srv));
+    wolfSSL_SetIOReadCtx(ssl_srv, &test_ctx);
+    wolfSSL_SetIOWriteCtx(ssl_srv, &test_ctx);
+#if !defined(NO_DH)
+    SetDH(ssl_srv);
+#endif
+
+    /* ssl_srv takes ownership of the empty stack. */
+    ExpectNotNull(empty = wolfSSL_sk_X509_NAME_new(NULL));
+    wolfSSL_set0_CA_list(ssl_srv, empty);
+
+    wolfSSL_CTX_set_cert_cb(ctx_cli, certificate_authorities_client_cb,
+            &cb_arg);
+
+    ExpectIntEQ(0, test_memio_do_handshake(ssl_cli, ssl_srv, 10, NULL));
+
+    /* NULL means the server sent no extension. Before the fix this was a
+     * present-but-empty list. */
+    ExpectNull(cb_arg.names2);
+
+    wolfSSL_free(ssl_cli);
+    wolfSSL_CTX_free(ctx_cli);
+    wolfSSL_free(ssl_srv);
+    wolfSSL_CTX_free(ctx_srv);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* A certificate_authorities list shorter than 3 bytes must be rejected on
+ * receive. TLSX_Parse only size-checks ClientHello and ServerHello, so a
+ * CertificateRequest used to slip an empty list through. */
+int test_certificate_authorities_short_parse(void) {
+    EXPECT_DECLS;
+#if defined(WOLFSSL_TLS13) && !defined(NO_CERTS) && \
+    !defined(WOLFSSL_NO_CA_NAMES) && defined(OPENSSL_EXTRA) && \
+    !defined(NO_WOLFSSL_CLIENT) && !defined(NO_TLS)
+    WOLFSSL_CTX* ctx = NULL;
+    WOLFSSL* ssl = NULL;
+    Suites suites;
+    /* type = 0x002f, size = 2, authorities list length = 0 */
+    const byte emptyList[] = { 0x00, 0x2f, 0x00, 0x02, 0x00, 0x00 };
+
+    XMEMSET(&suites, 0, sizeof(suites));
+
+    ExpectNotNull(ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method()));
+    ExpectNotNull(ssl = wolfSSL_new(ctx));
+
+    ExpectIntEQ(TLSX_Parse(ssl, emptyList, (word16)sizeof(emptyList),
+                           certificate_request, &suites),
+                WC_NO_ERR_TRACE(BUFFER_ERROR));
+
+    wolfSSL_free(ssl);
+    wolfSSL_CTX_free(ctx);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* An empty CA list must send no certificate_authorities extension at all.
+ * RFC 8446 section 4.2.4 requires at least one authority, so a present-but-empty
+ * extension is malformed; a strict peer would reject it with decode_error. Both
+ * peers here are wolfSSL, which accepts the empty extension and completes the
+ * handshake, so rather than a handshake failure this verifies the send-side fix:
+ * with an empty CA list the client sends no extension, so the server's callback
+ * sees none (cb_arg stays NULL). */
+int test_certificate_authorities_empty_client_hello(void) {
+    EXPECT_DECLS;
+#if !defined(NO_WOLFSSL_CLIENT) && !defined(NO_WOLFSSL_SERVER) && \
+    !defined(WOLFSSL_NO_CA_NAMES) && !defined(NO_BIO) && \
+    !defined(NO_CERTS) && (defined(OPENSSL_EXTRA) || \
+    defined(OPENSSL_EXTRA_X509_SMALL)) && (defined(OPENSSL_ALL) || \
+    defined(WOLFSSL_NGINX) || defined(HAVE_LIGHTY)) && \
+    defined(WOLFSSL_TLS13) && defined(HAVE_MANUAL_MEMIO_TESTS_DEPENDENCIES)
+
+    struct test_params {
+        method_provider client_meth;
+        method_provider server_meth;
+        int             doUdp;
+    } params[] = {
+    /* TLS >= 1.3 only */
+#ifdef WOLFSSL_TLS13
+        {wolfTLSv1_3_client_method, wolfTLSv1_3_server_method, 0},
+#endif
+#ifdef WOLFSSL_DTLS13
+        {wolfDTLSv1_3_client_method, wolfDTLSv1_3_server_method, 1},
+#endif
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(params) / sizeof(*params); i++) {
+        struct test_memio_ctx test_ctx;
+        WOLFSSL_CTX *ctx_srv = NULL;
+        WOLFSSL *ssl_srv = NULL;
+        WOLFSSL_CTX *ctx_cli = NULL;
+        WOLFSSL *ssl_cli = NULL;
+        WOLF_STACK_OF(X509_NAME) *cb_arg = NULL;
+        WOLF_STACK_OF(X509_NAME) *empty = NULL;
+
+        if (EXPECT_FAIL())
+            break;
+
+        XMEMSET(&test_ctx, 0, sizeof(test_ctx));
+
+        ExpectIntEQ(0, test_memio_setup(&test_ctx, &ctx_cli, &ctx_srv,
+                    &ssl_cli, &ssl_srv, params[i].client_meth,
+                    params[i].server_meth));
+
+        wolfSSL_CTX_set_cert_cb(ctx_srv, certificate_authorities_server_cb,
+                &cb_arg);
+
+        /* ssl_cli takes ownership of the empty stack. */
+        ExpectNotNull(empty = wolfSSL_sk_X509_NAME_new(NULL));
+        wolfSSL_set0_CA_list(ssl_cli, empty);
+
+        ExpectIntEQ(0, test_memio_do_handshake(ssl_cli, ssl_srv, 10, NULL));
+
+        /* The peer list is only built while reading the extension, so NULL
+         * here means the client never sent one. */
+        ExpectNull(cb_arg);
+
+        wolfSSL_shutdown(ssl_cli);
+        wolfSSL_free(ssl_cli);
+        wolfSSL_CTX_free(ctx_cli);
+        wolfSSL_free(ssl_srv);
+        wolfSSL_CTX_free(ctx_srv);
+    }
+#endif
+    return EXPECT_RESULT();
+}
+
 /* Test that the SNI size calculation returns 0 on overflow instead of
  * wrapping around to a small value (integer overflow vulnerability). */
 int test_TLSX_SNI_GetSize_overflow(void)
@@ -1945,6 +2104,68 @@ int test_TLSX_SRTP_msg_type_validation(void)
     ExpectIntEQ(TLSX_Parse(ssl, extBytes, (word16)sizeof(extBytes),
                            finished, NULL),
                 WC_NO_ERR_TRACE(EXT_NOT_ALLOWED));
+
+    wolfSSL_free(ssl);
+    wolfSSL_CTX_free(ctx);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* trusted_ca_keys is not used in TLS 1.3. It is still tolerated (ignored) in a
+ * ClientHello, since a version-negotiating client may legitimately offer it,
+ * but must be rejected with EXT_NOT_ALLOWED in any other message type. */
+int test_TLSX_TCA_tls13_msg_type_validation(void)
+{
+    EXPECT_DECLS;
+#if defined(WOLFSSL_TLS13) && !defined(NO_WOLFSSL_CLIENT) && !defined(NO_TLS)
+    WOLFSSL_CTX* ctx = NULL;
+    WOLFSSL* ssl = NULL;
+    Suites* suites = NULL;
+    /* type = TLSX_TRUSTED_CA_KEYS (0x0003), size = 0x0002,
+     * empty trusted_authorities_list (meets the ClientHello minimum size) */
+    const byte extBytes[] = { 0x00, 0x03, 0x00, 0x02, 0x00, 0x00 };
+
+    ExpectNotNull(ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method()));
+    ExpectNotNull(ssl = wolfSSL_new(ctx));
+    if (ssl != NULL)
+        suites = (Suites*)WOLFSSL_SUITES(ssl);
+
+    ExpectIntEQ(TLSX_Parse(ssl, extBytes, (word16)sizeof(extBytes),
+                           client_hello, suites), 0);
+    ExpectIntEQ(TLSX_Parse(ssl, extBytes, (word16)sizeof(extBytes),
+                           encrypted_extensions, NULL),
+                WC_NO_ERR_TRACE(EXT_NOT_ALLOWED));
+
+    wolfSSL_free(ssl);
+    wolfSSL_CTX_free(ctx);
+#endif
+    return EXPECT_RESULT();
+}
+
+/* RFC 9001 Section 8.2: an endpoint that receives quic_transport_parameters on
+ * a connection that is not using QUIC must abort with an unsupported_extension
+ * alert, rather than the illegal_parameter implied by EXT_NOT_ALLOWED. */
+int test_TLSX_QUIC_TP_non_quic(void)
+{
+    EXPECT_DECLS;
+#if defined(WOLFSSL_QUIC) && defined(WOLFSSL_TLS13) && \
+    !defined(NO_WOLFSSL_CLIENT) && !defined(NO_TLS)
+    WOLFSSL_CTX* ctx = NULL;
+    WOLFSSL* ssl = NULL;
+    WOLFSSL_ALERT_HISTORY history;
+    /* type = TLSX_KEY_QUIC_TP_PARAMS (0x0039), size = 0x0000 */
+    const byte extBytes[] = { 0x00, 0x39, 0x00, 0x00 };
+
+    /* No wolfSSL_set_quic_method(): this is a plain TLS connection. */
+    ExpectNotNull(ctx = wolfSSL_CTX_new(wolfTLSv1_3_client_method()));
+    ExpectNotNull(ssl = wolfSSL_new(ctx));
+
+    ExpectIntEQ(TLSX_Parse(ssl, extBytes, (word16)sizeof(extBytes),
+                           encrypted_extensions, NULL),
+                WC_NO_ERR_TRACE(UNSUPPORTED_EXTENSION));
+    ExpectIntEQ(wolfSSL_get_alert_history(ssl, &history), WOLFSSL_SUCCESS);
+    ExpectIntEQ(history.last_tx.level, alert_fatal);
+    ExpectIntEQ(history.last_tx.code, unsupported_extension);
 
     wolfSSL_free(ssl);
     wolfSSL_CTX_free(ctx);

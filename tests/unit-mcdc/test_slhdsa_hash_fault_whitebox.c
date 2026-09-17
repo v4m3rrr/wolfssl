@@ -22,7 +22,7 @@
 /*
  * MC/DC hash-fault white-box supplement for wolfcrypt/src/wc_slhdsa.c.
  *
- * campaign/reports/slhdsa/GAPS.md is almost entirely error propagation:
+ * suite/reports/slhdsa/the uncovered-condition report is almost entirely error propagation:
  *
  *     if ((ret == 0) && (hdr != NULL))                 -- PRF_msg / H_msg
  *     if ((ret == 0) && (ctxSz > 0) && (ctx != NULL))     streaming chains
@@ -41,7 +41,7 @@
  *
  * WHERE THE INDEX HAS TO LAND
  * ---------------------------
- * SLH-DSA sign is by far the most expensive operation in the campaign, so the
+ * SLH-DSA sign is by far the most expensive operation in the harness, so the
  * sweep is deliberately shaped:
  *
  *   - a DENSE head (1..WB_DENSE) over every entry point. Almost all of the
@@ -54,7 +54,7 @@
  *     densely than Sign, because verify is orders of magnitude cheaper.
  *
  * Every sweep also tests a CPU-time deadline, so the binary degrades to fewer
- * points instead of being killed at the campaign's 600 s TEST_TIMEOUT -- a
+ * points instead of being killed at the 600 s TEST_TIMEOUT -- a
  * timeout is scored as a SILENT SKIP and would lose the whole file (HARD
  * RULE 2).
  *
@@ -70,7 +70,7 @@
  * slhdsakey_precompute_sha2_midstates()).
  *
  * NOT REACHABLE HERE (documented residuals, mirrored in
- * campaign/db/exclusions.json):
+ * the exclusion record):
  *   - `(ret == 0) && (n > 16)` / `(ret == 0) && (key->params->n > 16)`: the
  *     second operand needs a category 3/5 parameter set, and this module's base
  *     config compiles ONLY the 128-bit sets (WOLFSSL_SLHDSA_PARAM_NO_192/256
@@ -124,7 +124,7 @@ static int wb_fail = 0;
 #define WB_POINTS_VERIFY  128
 #define WB_DEADLINE_S     170
 
-/* WALL clock, not clock(): the campaign runs several variants concurrently and
+/* WALL clock, not clock(): the harness runs several variants concurrently and
  * TEST_TIMEOUT is 600 s of WALL time. Under that contention CPU time accrues
  * far slower than wall time, so a CPU-time budget would sail past the timeout
  * -- and a timed-out white-box is scored as a SILENT SKIP that loses the whole
@@ -381,8 +381,8 @@ static void wb_sweep_prehash(int param)
  * on its own -- it has the same outcome as the ordinary (T, compare-equal) row.
  * The (T,T) row is produced by corrupting the STORED root before the call:
  * CheckKey re-derives the real root from the seeds, so the comparison differs
- * while ret is still 0. The re-derivation also rewrites key->sk with the
- * correct root, so the key is left exactly as it was found. */
+ * while ret is still 0. CheckKey does not write to the key, so this undoes
+ * the corruption itself. */
 static void wb_sweep_checkkey(int param)
 {
     long n, points = 0;
@@ -402,8 +402,9 @@ static void wb_sweep_checkkey(int param)
         WB_NOTE("CheckKey accepted a key whose stored root was corrupted");
         wb_fail = 1;
     }
+    wb_key.sk[3 * n8] ^= 0x01;
     if (wc_SlhDsaKey_CheckKey(&wb_key) != 0) {
-        WB_NOTE("CheckKey did not restore the recomputed root");
+        WB_NOTE("CheckKey rejected the key after the corruption was undone");
         wb_fail = 1;
     }
 
@@ -642,6 +643,6 @@ int main(void)
 #endif
 
     printf("done (%s)\n", wb_fail ? "with failures" : "ok");
-    /* A non-zero exit makes the campaign discard this binary's coverage. */
+    /* A non-zero exit makes the harness discard this binary's coverage. */
     return 0;
 }

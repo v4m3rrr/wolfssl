@@ -4,6 +4,7 @@
 nobase_include_HEADERS+= \
                          wolfssl/wolfcrypt/aes.h \
                          wolfssl/wolfcrypt/arc4.h \
+                         wolfssl/wolfcrypt/argon2.h \
                          wolfssl/wolfcrypt/ascon.h \
                          wolfssl/wolfcrypt/asn.h \
                          wolfssl/wolfcrypt/asn_public.h \
@@ -11,6 +12,7 @@ nobase_include_HEADERS+= \
                          wolfssl/wolfcrypt/poly1305.h \
                          wolfssl/wolfcrypt/camellia.h \
                          wolfssl/wolfcrypt/cmac.h \
+                         wolfssl/wolfcrypt/wc_keystore.h \
                          wolfssl/wolfcrypt/wc_she.h \
                          wolfssl/wolfcrypt/coding.h \
                          wolfssl/wolfcrypt/compress.h \
@@ -105,6 +107,19 @@ noinst_HEADERS+= \
                          wolfssl/wolfcrypt/port/xilinx/xil-sha3.h \
                          wolfssl/wolfcrypt/port/xilinx/xil-versal-glue.h \
                          wolfssl/wolfcrypt/port/xilinx/xil-versal-trng.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_cipher.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_cmac.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_compat.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_cryptocb.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_ecc.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_ecdh.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_ecies.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_hash.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_hmac.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_rng.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_rsa.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_settings.h \
+                         wolfssl/wolfcrypt/port/xilinx/versal_gen2_asu/asu_util.h \
                          wolfssl/wolfcrypt/port/caam/caam_driver.h \
                          wolfssl/wolfcrypt/port/caam/caam_error.h \
                          wolfssl/wolfcrypt/port/caam/caam_qnx.h \

@@ -5309,7 +5309,8 @@ int wolfSSL_EC25519_shared_key(unsigned char *shared, unsigned int *sharedSz,
 int wolfSSL_ED25519_generate_key(unsigned char *priv, unsigned int *privSz,
     unsigned char *pub, unsigned int *pubSz)
 {
-#if defined(WOLFSSL_KEY_GEN) && defined(HAVE_ED25519_KEY_EXPORT)
+#if defined(WOLFSSL_KEY_GEN) && defined(HAVE_ED25519_KEY_EXPORT) && \
+    defined(HAVE_ED25519_MAKE_KEY)
     int res = 1;
     int initTmpRng = 0;
     WC_RNG *rng = NULL;
@@ -5366,7 +5367,9 @@ int wolfSSL_ED25519_generate_key(unsigned char *priv, unsigned int *privSz,
 
     return res;
 #else
-#ifndef WOLFSSL_KEY_GEN
+#ifndef HAVE_ED25519_MAKE_KEY
+    WOLFSSL_MSG("No ED25519 make key built in");
+#elif !defined(WOLFSSL_KEY_GEN)
     WOLFSSL_MSG("No Key Gen built in");
 #else
     WOLFSSL_MSG("No ED25519 key export built in");
@@ -5378,7 +5381,7 @@ int wolfSSL_ED25519_generate_key(unsigned char *priv, unsigned int *privSz,
     (void)pubSz;
 
     return 0;
-#endif /* WOLFSSL_KEY_GEN && HAVE_ED25519_KEY_EXPORT */
+#endif /* WOLFSSL_KEY_GEN && HAVE_ED25519_KEY_EXPORT && HAVE_ED25519_MAKE_KEY */
 }
 
 /* Sign a message with Ed25519 using the private key.
@@ -5550,8 +5553,8 @@ int wolfSSL_ED25519_verify(const unsigned char *msg, unsigned int msgSz,
 
 #endif /* OPENSSL_EXTRA && HAVE_ED25519 */
 
-#if (defined(OPENSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL)) && \
-    defined(HAVE_ED25519)
+#if (defined(OPENSSL_EXTRA) || defined(WOLFSSL_WPAS_SMALL) || \
+    defined(OPENSSL_EXTRA_X509_SMALL)) && defined(HAVE_ED25519)
 /* Allocate and initialize a new ed25519_key.
  *
  * @param [in] heap   Heap hint for memory allocation.
@@ -5602,7 +5605,8 @@ void wolfSSL_ED25519_free(ed25519_key* key)
     #endif
     }
 }
-#endif /* (OPENSSL_EXTRA || WOLFSSL_WPAS_SMALL) && HAVE_ED25519 */
+#endif /* (OPENSSL_EXTRA || WOLFSSL_WPAS_SMALL || OPENSSL_EXTRA_X509_SMALL) &&
+        * HAVE_ED25519 */
 
 /*******************************************************************************
  * END OF ED25519 API
@@ -6838,7 +6842,7 @@ static void pem_find_pattern(char* pem, int pemLen, int idx, const char* prefix,
 
     *start = *len = 0;
     /* Find prefix part. */
-    for (; idx < pemLen - prefixLen; idx++) {
+    for (; idx <= pemLen - prefixLen; idx++) {
         if ((pem[idx] == prefix[0]) &&
                 (XMEMCMP(pem + idx, prefix, (size_t)prefixLen) == 0)) {
             idx += prefixLen;
@@ -6847,7 +6851,7 @@ static void pem_find_pattern(char* pem, int pemLen, int idx, const char* prefix,
         }
     }
     /* Find postfix part. */
-    for (; idx < pemLen - postfixLen; idx++) {
+    for (; idx <= pemLen - postfixLen; idx++) {
         if ((pem[idx] == postfix[0]) &&
                 (XMEMCMP(pem + idx, postfix, (size_t)postfixLen) == 0)) {
             *len = idx - *start;
@@ -6900,9 +6904,21 @@ static int pem_read_data(char* pem, int pemLen, char **name, char **header,
         }
     }
     if (ret == 0) {
-        /* Find encryption headers after header. */
+        /* Find footer. */
         start += nameLen + PEM_HDR_FIN_SZ;
-        pem_find_pattern(pem, pemLen, start, "\n", "\n\n", &startHdr, &hdrLen);
+        pem_find_pattern(pem, pemLen, start, PEM_END, PEM_HDR_FIN, &startEnd,
+            &endLen);
+        /* Validate header name and footer name are the same. */
+        if ((endLen != nameLen) ||
+                 (XMEMCMP(*name, pem + startEnd, (size_t)nameLen) != 0)) {
+            ret = ASN_NO_PEM_HEADER;
+        }
+    }
+    if (ret == 0) {
+        /* Find encryption headers - bounded by the footer so that a blank line
+         * after it isn't matched. */
+        pem_find_pattern(pem, startEnd - PEM_END_SZ, start, "\n", "\n\n",
+            &startHdr, &hdrLen);
         if (hdrLen > 0) {
             /* Include first of two '\n' characters. */
             hdrLen++;
@@ -6920,15 +6936,6 @@ static int pem_read_data(char* pem, int pemLen, char **name, char **header,
         if (hdrLen > 0) {
             XMEMCPY(*header, pem + startHdr, (size_t)hdrLen);
             start = startHdr + hdrLen + 1;
-        }
-
-        /* Find footer. */
-        pem_find_pattern(pem, pemLen, start, PEM_END, PEM_HDR_FIN, &startEnd,
-            &endLen);
-        /* Validate header name and footer name are the same. */
-        if ((endLen != nameLen) ||
-                 (XMEMCMP(*name, pem + startEnd, (size_t)nameLen) != 0)) {
-            ret = ASN_NO_PEM_HEADER;
         }
     }
     if (ret == 0) {
@@ -7374,13 +7381,53 @@ int pkcs8_encrypt(WOLFSSL_EVP_PKEY* pkey,
         }
 
         if (ret == 0) {
-            /* Encrypt private into buffer. */
-            ret = TraditionalEnc((byte*)pkey->pkey.ptr + pkey->pkcs8HeaderSz,
-                (word32)pkey->pkey_sz - pkey->pkcs8HeaderSz,
-                key, keySz, passwd, passwdSz, PKCS5, PBES2, encAlgId,
-                NULL, 0, WC_PKCS12_ITT_DEFAULT, &rng, NULL);
-            if (ret > 0) {
-                *keySz = (word32)ret;
+#if defined(HAVE_ED25519) && defined(HAVE_ED25519_KEY_EXPORT)
+            if (pkey->type == WC_EVP_PKEY_ED25519) {
+                /* The cached pkey.ptr is a full PKCS#8 blob and TraditionalEnc
+                 * requires a *traditional* (unwrapped) key.  Build the PKCS#8
+                 * from the key object via pkcs8_encode() and encrypt it with
+                 * wc_EncryptPKCS8Key(), which expects PKCS#8 input. */
+                byte*  edDer = NULL;
+                word32 edDerSz = 0;
+
+                if (pkcs8_encode(pkey, NULL, &edDerSz) !=
+                        WC_NO_ERR_TRACE(LENGTH_ONLY_E) || edDerSz == 0) {
+                    ret = BAD_FUNC_ARG;
+                }
+                else {
+                    edDer = (byte*)XMALLOC(edDerSz, pkey->heap,
+                        DYNAMIC_TYPE_TMP_BUFFER);
+                    if (edDer == NULL)
+                        ret = MEMORY_E;
+                    else
+                        ret = pkcs8_encode(pkey, edDer, &edDerSz);
+                }
+                if (ret > 0) {
+                    edDerSz = (word32)ret;
+                    ret = wc_EncryptPKCS8Key(edDer, edDerSz, key, keySz,
+                        passwd, passwdSz, PKCS5, PBES2, encAlgId,
+                        NULL, 0, WC_PKCS12_ITT_DEFAULT, &rng, NULL);
+                    if (ret > 0) {
+                        *keySz = (word32)ret;
+                    }
+                }
+                if (edDer != NULL) {
+                    ForceZero(edDer, edDerSz);
+                    XFREE(edDer, pkey->heap, DYNAMIC_TYPE_TMP_BUFFER);
+                }
+            }
+            else
+#endif /* HAVE_ED25519 && HAVE_ED25519_KEY_EXPORT */
+            {
+                /* Encrypt private into buffer. */
+                ret = TraditionalEnc(
+                    (byte*)pkey->pkey.ptr + pkey->pkcs8HeaderSz,
+                    (word32)pkey->pkey_sz - pkey->pkcs8HeaderSz,
+                    key, keySz, passwd, passwdSz, PKCS5, PBES2, encAlgId,
+                    NULL, 0, WC_PKCS12_ITT_DEFAULT, &rng, NULL);
+                if (ret > 0) {
+                    *keySz = (word32)ret;
+                }
             }
         }
         /* Dispose of random number generator. */
@@ -7449,6 +7496,36 @@ int pkcs8_encode(WOLFSSL_EVP_PKEY* pkey, byte* key, word32* keySz)
         algId = DHk;
         curveOid = NULL;
         oidSz = 0;
+    }
+#endif
+#if defined(HAVE_ED25519)
+    else if (pkey->type == WC_EVP_PKEY_ED25519) {
+    #if defined(HAVE_ED25519_KEY_EXPORT)
+        /* Build the PKCS#8 PrivateKeyInfo from the key object. A public-only
+         * key (e.g. from wolfSSL_X509_get_pubkey()) has no private half to
+         * encode (privKeySet == 0) and is rejected. */
+        if (keySz == NULL || pkey->ed25519 == NULL ||
+                !pkey->ed25519->privKeySet)
+            return BAD_FUNC_ARG;
+
+        ret = wc_Ed25519PrivateKeyToDer(pkey->ed25519, NULL, 0);
+        if (ret <= 0)
+            return (ret < 0) ? ret : BAD_FUNC_ARG;
+
+        if (key == NULL) {          /* length query */
+            *keySz = (word32)ret;
+            return LENGTH_ONLY_E;
+        }
+        if (*keySz < (word32)ret)   /* honour the caller's buffer size */
+            return BUFFER_E;
+
+        ret = wc_Ed25519PrivateKeyToDer(pkey->ed25519, key, *keySz);
+        if (ret > 0)
+            *keySz = (word32)ret;   /* only set on success */
+        return ret;
+    #else
+        return NOT_COMPILED_IN;
+    #endif /* HAVE_ED25519_KEY_EXPORT */
     }
 #endif
     else {

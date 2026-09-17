@@ -1,5 +1,9 @@
 # wolfSSL Release (unreleased)
 
+## Post-Quantum Cryptography (PQC)
+
+* Added ML-KEM (FIPS 203) key OIDs, SubjectPublicKeyInfo and PKCS#8 encoding, and X.509 certificate support, including issuing an ML-KEM certificate with `wc_MakeCert_ex`. A key initialised with the new `WC_ML_KEM_TYPE_UNSET` takes its parameter set from the DER being decoded. by @Frauschi
+
 ## Behavioral Changes
 
 * **Behavioral change (`wc_PufReadSram` health tests the raw SRAM readout)**:
@@ -170,7 +174,96 @@
   configuration now sees neither the prototype nor the `client_cert_cb`
   typedef instead of failing to build; no other configuration changes.
 
+* **Behavioral change (`wolfSSL_write_early_data` and the AEAD key usage
+  limit)**: RFC 9846, Section 5.5 adds that "it is not possible to perform a
+  KeyUpdate for early data; therefore, implementations MUST NOT exceed the
+  limits when sending early data".  Reaching the limit mid-early-data
+  previously drove the ordinary rekey path, which emitted a KeyUpdate while
+  the client was still in `CLIENT_HELLO_COMPLETE` - before the handshake had
+  finished, where a conforming peer must reject it.  The write now fails
+  instead, returning `WOLFSSL_FATAL_ERROR` with `wolfSSL_get_error()`
+  reporting `TOO_MUCH_EARLY_DATA`.  The write stays all-or-nothing, matching
+  every other non-`partialWrite` return from `SendData()`.  The budget also
+  now stops one record short, because an accepted 0-RTT exchange still owes
+  the server an `EndOfEarlyData`, and RFC 9846 Section 2.3 sends that under the
+  same early traffic keys.  Callers that hit this should abandon early data on
+  the connection rather than resume the send from an offset.  Reaching the
+  limit needs roughly 23.7 million early data records on one connection, so no
+  practical caller is affected.
+
+## New Features
+
+* Added Argon2 (RFC 9106) password hashing with all three variants - Argon2d, Argon2i and Argon2id - via `--enable-argon2`. Only version 0x13 is implemented. Provides the one-shot `wc_Argon2()`/`wc_Argon2_ex()` and a reusable context API (`wc_Argon2Init`/`wc_Argon2SetParams`/`wc_Argon2DeriveTag`/`wc_Argon2Free`, plus `wc_Argon2New`/`wc_Argon2Delete` unless `WC_NO_CONSTRUCTORS`) that allocates the memory block array once for applications deriving many tags. `--enable-argon2-threads` fills the segments of a slice in parallel, which does not change the derived tag: the one-shot functions use a thread per lane, and the context API takes a count from `wc_Argon2SetThreads()`. by @SparkiDev
+
 ## Fixes
+
+* **Fix (sniffer could not decrypt Encrypt-Then-MAC or X25519 sessions)**: the
+  sniffer never handled the `encrypt_then_mac` extension (RFC 7366) in the
+  ServerHello, so for a CBC suite it passed the trailing MAC to the block
+  decrypt along with the ciphertext, the length was not a multiple of the block
+  size, and every record failed.  Since wolfSSL peers negotiate it by default,
+  this covered most TLS 1.2 CBC captures.  Separately, curve25519 blinding
+  draws from the private key's own RNG, which the sniffer's static ephemeral
+  key never had, so every X25519 shared secret failed with `BAD_FUNC_ARG` and
+  no X25519 traffic could be read; the key now gets `wc_curve25519_set_rng()`,
+  as the library's own static ephemeral path already did.  A build without
+  Encrypt-Then-MAC support now reports that, once the negotiated suite is known
+  to be a block cipher, rather than failing every record with a generic decrypt
+  error.  Both the `client_key_exchange` handler and the TLS 1.3 ServerHello
+  path also overwrote a specific error with "Server Client Key Mismatch", which
+  hid the reason a session could not be decrypted; they now keep an error that
+  has already been described.
+
+* **Fix (sniffer reported plaintext lengths that included the MAC or AEAD
+  tag)**: the length returned to the caller was taken from the record size
+  without removing what `DecryptMessage()` had already accounted for in
+  `ssl->keys.padSz`, so a 14 byte payload was reported as 30 under TLS 1.2
+  AES-GCM.  The plaintext itself was correct, only the length was wrong, so a
+  caller trusting it read past the end of the message.  The sniffer now
+  subtracts `padSz`, matching the non-sniffer read path.  The same corrected
+  length is handed to the `WOLFSSL_SNIFFER_STORE_DATA_CB` callback, which
+  previously received the raw record size and so read past the end of the
+  decrypt output buffer; that overread is confirmed by AddressSanitizer and is
+  fixed here.
+
+* **Fix (`ssl_FreeSniffer()` tore down state shared by every thread)**: the
+  sniffer's session, server and secret tables are per thread, but its trace
+  file, mutexes and crypto device belong to the whole process, and every call
+  released all of it.  A thread that finished early closed the trace file and
+  freed the mutexes under the threads still running.  The init entry points now
+  count their callers and only the last free releases the shared state; a free
+  with no matching init leaves the count at zero rather than driving it
+  negative.  `StatsMutex` was initialized but never freed, and is now released
+  with the rest.  Single threaded use is unaffected.
+
+* **Fix (`snifftest` could not report a failed capture, and decrypted nothing
+  when threaded)**: the read loop assigned `hadBadPacket` on every packet
+  instead of accumulating it, so an early error was erased by any later packet
+  that decoded cleanly and the process still exited 0.  A new `-expectdata`
+  option additionally exits non-zero when no application data could be
+  decrypted at all; it is off by default so that a handshake-only capture still
+  exits 0.  Under `THREADED_SNIFFTEST` the worker checked its shutdown flag
+  before draining its packet queue, and reading a capture file normally sets
+  that flag before the worker is first scheduled, so it returned without
+  decoding anything; it now drains whatever is still queued.  The workers also
+  never repeated the keylog setup `main()` does for itself, which the thread
+  local server and secret tables require, so every packet was reported as
+  coming from an unregistered server.  Finally the example
+  `WOLFSSL_SNIFFER_STORE_DATA_CB` callback sized its buffer from the first
+  record of a packet and reused it for every later one, even though the offset
+  it is handed restarts at zero for each record, so a larger second record
+  wrote past the end; it now grows the buffer per record and appends.
+
+* **Fix (a sniffer build could not complete a DTLS 1.3 handshake)**: with
+  `WOLFSSL_SNIFFER` defined, the example client and server pin themselves to a
+  static RSA and static ECC cipher list so that a capture can be decrypted.
+  The guard for that read `version < 4`, meant to leave TLS 1.3 alone, but the
+  examples encode a DTLS version as a negative number and DTLS 1.3 is `-4`, so
+  a `-u -v 4` run was given a TLS 1.2 only cipher list.  The server then found
+  no common TLS 1.3 suite while processing the ClientHello and failed the
+  handshake with `MATCH_SUITE_ERROR`, which the client saw as a
+  `missing_extension` alert.  Only the examples were affected; an application
+  that does not set that cipher list was always able to handshake.
 
 * **Fix (certificate manager left pointing at a released store)**:
   `wolfSSL_CTX_set_cert_store()` pairs the store handed to it with the
@@ -197,6 +290,43 @@
   An allocation failure while unmasking leaves the capabilities alone rather
   than withdrawing them, matching what a failure to allocate the `ecc_key`
   already did.  Only affects builds with `WOLFSSL_BLIND_PRIVATE_KEY`.
+
+* **Fix (fatal-level `user_canceled` closed a TLS 1.3 connection)**: RFC 9846,
+  Section 6.1 states that this alert "generally has AlertLevel=warning" and
+  that "receiving implementations SHOULD continue to read data from the peer
+  until a 'close_notify' is received".  wolfSSL already exempted
+  `user_canceled` from the TLS 1.3 rule that all error alerts are fatal, but
+  both `DoAlert()` and `DoProcessAlertRecord()` acted on the AlertLevel byte
+  before reaching those exemptions, so a peer sending the alert at fatal level
+  tore the connection down and invalidated the session.  The level byte
+  carries no meaning in TLS 1.3, and the alert is now ignored whichever level
+  the peer used.  TLS 1.2 and earlier are unchanged: a fatal-level alert
+  remains fatal there.
+
+* **Fix (key update cap turned a peer's `update_requested` into a fatal
+  error)**: RFC 9846, Section 4.7.3 adds that a sender at the 2^48-1 key
+  update cap "MUST NOT send its own KeyUpdate ... and SHOULD instead ignore
+  the 'update_requested' flag".  Responding to a peer's request went through
+  the ordinary send path, which refuses at the cap with `BAD_STATE_E`, and
+  that error propagated out and killed the connection.  The request is now
+  dropped and the connection continues on its current keys until the Section
+  5.5 data limits force it closed.  An application-initiated
+  `wolfSSL_update_keys()` at the cap still reports `BAD_STATE_E`; the rule
+  applies only to responding to a peer.
+
+* **Fix (malformed extension aborted without sending `decode_error`)**: RFC
+  9846, Section 4.3 adds that trailing data in an extension is forbidden and
+  that "receivers MUST abort the handshake with a 'decode_error' alert if
+  there is data left over after parsing the structure".  The extension parsers
+  detect malformed structures, but around a third of them report it as the
+  wolfCrypt `BUFFER_E` rather than `BUFFER_ERROR`, and only `BUFFER_ERROR` was
+  mapped to an alert.  `TranslateErrorToAlert()` returned `invalid_alert` for
+  `BUFFER_E`, which every caller treats as "send nothing", so the handshake
+  aborted correctly but silently and the peer saw only a dropped connection.
+  Both codes now map to `decode_error`.  This affects `pre_shared_key`,
+  `psk_key_exchange_modes`, `early_data`, `cookie`, `post_handshake_auth` and
+  the certificate type extensions, and more generally any malformed handshake
+  message reported with `BUFFER_E`.
 
 # wolfSSL Release 5.9.2 (Jun 23, 2026)
 

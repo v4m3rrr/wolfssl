@@ -530,9 +530,9 @@ int wolfCrypt_Init(void)
     #endif
 
     #if defined(WOLFSSL_USE_SAVE_VECTOR_REGISTERS) && defined(WOLFSSL_LINUXKM)
-        ret = allocate_wolfcrypt_linuxkm_fpu_states();
+        ret = wc_linuxkm_allocate_svr_states();
         if (ret != 0) {
-            WOLFSSL_MSG("allocate_wolfcrypt_linuxkm_fpu_states failed");
+            WOLFSSL_MSG("wc_linuxkm_allocate_svr_states failed");
             WOLFCRYPT_INIT_RAISE_BAD_STATE();
         }
     #endif
@@ -574,8 +574,7 @@ int wolfCrypt_Init(void)
     #endif
 
     /* Register the Versal Gen2 ASU device so wolfCrypt operations route to the
-     * ASU hardware. The ASU client must already be initialized by the
-     * application with XAsu_ClientInit. */
+     * ASU hardware. Registering also brings the ASU client up. */
     #if defined(WOLFSSL_VERSAL_GEN2_ASU) && defined(WOLF_CRYPTO_CB)
         ret = wc_AsuCryptoCb_RegisterDevice(WOLFSSL_VERSAL_GEN2_ASU_DEVID);
         if (ret != 0) {
@@ -893,7 +892,7 @@ int wolfCrypt_Cleanup(void)
         wolfSSL_CleanupHandle();
     #endif
     #if defined(WOLFSSL_USE_SAVE_VECTOR_REGISTERS) && defined(WOLFSSL_LINUXKM)
-        free_wolfcrypt_linuxkm_fpu_states();
+        wc_linuxkm_free_svr_states();
     #endif
 
     #ifdef HAVE_ENTROPY_MEMUSE
@@ -5677,6 +5676,8 @@ char* wolfSSL_strnstr(const char* s1, const char* s2, size_t n)
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef O_CLOEXEC
     #define O_CLOEXEC 0
@@ -5710,6 +5711,44 @@ int wc_open_cloexec(const char* path, int flags)
 #endif
     return fd;
 }
+
+/* As wc_open_cloexec(), for flags with O_CREAT, where open() needs a mode. */
+int wc_open_cloexec_mode(const char* path, int flags, int mode)
+{
+    int fd = open(path, flags | O_CLOEXEC, mode);
+#ifdef FD_CLOEXEC
+    if (fd < 0 && errno == EINVAL) {
+        fd = open(path, flags, mode);
+        wc_set_cloexec(fd);
+    }
+#endif
+    return fd;
+}
+
+#if !defined(NO_FILESYSTEM) && defined(XFDOPEN)
+/* Truncate or create path for writing, owner read/write only. */
+XFILE wc_fopen_owner_only(const char* path)
+{
+    XFILE file;
+    int fd = wc_open_cloexec_mode(path, O_RDWR | O_CREAT | O_TRUNC,
+                                  S_IRUSR | S_IWUSR);
+    if (fd < 0)
+        return XBADFILE;
+
+#ifndef WOLFSSL_NO_FCHMOD
+    if (fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
+        close(fd);
+        return XBADFILE;
+    }
+#endif
+
+    file = XFDOPEN(fd, "w+b");
+    if (file == XBADFILE)
+        close(fd);
+
+    return file;
+}
+#endif /* !NO_FILESYSTEM && XFDOPEN */
 
 int wc_socket_cloexec(int domain, int type, int protocol)
 {

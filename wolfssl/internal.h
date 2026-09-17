@@ -53,7 +53,10 @@
 #ifdef HAVE_POLY1305
     #include <wolfssl/wolfcrypt/poly1305.h>
 #endif
-#if defined(HAVE_CHACHA) && defined(HAVE_POLY1305) && defined(OPENSSL_EXTRA)
+#if defined(HAVE_CHACHA) && defined(HAVE_POLY1305)
+    /* Not OPENSSL_EXTRA-only: the TLS record layer calls the persistent-key
+     * helpers wc_ChaCha20Poly1305_{Encrypt,Decrypt}_ex(), so this header has
+     * to be visible whenever the ChaCha20-Poly1305 suites are built. */
     #include <wolfssl/wolfcrypt/chacha20_poly1305.h>
 #endif
 #ifdef HAVE_ARIA
@@ -2258,6 +2261,11 @@ WOLFSSL_LOCAL int InitSSL_Suites(WOLFSSL* ssl);
 WOLFSSL_LOCAL int InitSSL_Side(WOLFSSL* ssl, word16 side);
 
 
+#if defined(HAVE_CURVE25519) && !defined(WOLFSSL_X25519_NO_MASK_PEER)
+WOLFSSL_LOCAL const byte* MaskCurve25519PeerKey(const byte* pub, word32 pubSz,
+                                               byte maskBuf[CURVE25519_KEYSIZE]);
+#endif
+
 WOLFSSL_LOCAL int DoHandShakeMsgType(WOLFSSL* ssl, byte* input,
         word32* inOutIdx, byte type, word32 size, word32 totalSz);
 /* for sniffer */
@@ -2645,9 +2653,16 @@ struct CRL_Entry {
     WOLFSSL_X509_NAME*    issuer;     /* X509_NAME type issuer */
 #endif
     CRL_Entry* next;                      /* next entry */
+#ifdef CRL_STATIC_REVOKED_LIST
+    RevokedCert certs[CRL_MAX_REVOKED_CERTS];
+#else
+    RevokedCert* certs;             /* revoked cert list  */
+#endif
     wolfSSL_Mutex verifyMutex;
-    /* DupCRL_Entry copies data after the `verifyMutex` member. Using the mutex
-     * as the marker because clang-tidy doesn't like taking the sizeof a
+    /* DupCRL_Entry bulk copies the data after the `verifyMutex` member, so
+     * only self-contained value data belongs below it. Anything holding a
+     * pointer goes above, where DupCRL_Entry copies it explicitly. Using the
+     * mutex as the marker because clang-tidy doesn't like taking the sizeof a
      * pointer. */
     char    crlNumber[CRL_MAX_NUM_HEX_STR_SZ];    /* CRL number extension */
     byte    issuerHash[CRL_DIGEST_SIZE];  /* issuer hash                 */
@@ -2660,11 +2675,6 @@ struct CRL_Entry {
 #if defined(OPENSSL_EXTRA)
     WOLFSSL_ASN1_TIME lastDateAsn1;  /* last date updated  */
     WOLFSSL_ASN1_TIME nextDateAsn1;  /* next update date   */
-#endif
-#ifdef CRL_STATIC_REVOKED_LIST
-    RevokedCert certs[CRL_MAX_REVOKED_CERTS];
-#else
-    RevokedCert* certs;             /* revoked cert list  */
 #endif
     int     totalCerts;             /* number on list     */
     int     version;                /* version of certificate */
@@ -4104,6 +4114,7 @@ WOLFSSL_LOCAL int TLSX_ConnectionID_Use(WOLFSSL* ssl);
 WOLFSSL_LOCAL int TLSX_ConnectionID_Parse(WOLFSSL* ssl, const byte* input,
     word16 length, byte isRequest);
 WOLFSSL_LOCAL void DtlsCIDOnExtensionsParsed(WOLFSSL* ssl);
+WOLFSSL_LOCAL byte DtlsCIDIsNegotiated(WOLFSSL* ssl);
 WOLFSSL_LOCAL byte DtlsCIDCheck(WOLFSSL* ssl, const byte* input,
     word16 inputSize);
 WOLFSSL_LOCAL int DtlsCidReplaceTx(WOLFSSL* ssl, const byte* cid, byte size);
@@ -4401,6 +4412,16 @@ struct WOLFSSL_CTX {
 #endif
 #ifdef WOLFSSL_EARLY_DATA
     word32          maxEarlyDataSz;
+#if defined(WOLFSSL_TLS13) && defined(HAVE_SESSION_TICKET) && !defined(NO_TLS)
+    /* RFC 8446 Section 8.2: reject 0-RTT for tickets minted before this
+     * context was created. */
+#ifdef WOLFSSL_32BIT_MILLI_TIME
+    word32          ticketStartTime;    /* Ctx creation time (ms) */
+#else
+    sword64         ticketStartTime;    /* Ctx creation time (ms) */
+#endif
+    byte            noFreshStartCheck:1; /* Skip the fresh start check */
+#endif
 #endif
 #ifdef HAVE_ANON
     byte        useAnon;               /* User wants to allow Anon suites */
@@ -5277,8 +5298,10 @@ typedef struct Buffers {
 #endif
     byte            weOwnDH;               /* SSL own dh (p,g)  flag */
 #ifndef NO_DH
-    buffer          serverDH_P;            /* WOLFSSL_CTX owns, unless we own */
-    buffer          serverDH_G;            /* WOLFSSL_CTX owns, unless we own */
+    /* SSL owns p and g when weOwnDH is set. Otherwise they point at the
+     * static parameters of a named group, which nothing owns. */
+    buffer          serverDH_P;
+    buffer          serverDH_G;
     buffer          serverDH_Pub;
     buffer          serverDH_Priv;
     DhKey*          serverDH_Key;
@@ -5354,6 +5377,12 @@ typedef struct Buffers {
     buffer          certVerifyMsg;
 #endif
 } Buffers;
+
+#ifndef NO_DH
+/* Give the SSL object its own copy of the context's DH parameters. They are
+ * not reference counted, so a session must not point at the context's. */
+WOLFSSL_LOCAL int CopySSL_CTX_DhParams(WOLFSSL* ssl, WOLFSSL_CTX* ctx);
+#endif
 
 /* sub-states for send/do key share (key exchange) */
 enum asyncState {
@@ -5483,6 +5512,9 @@ struct Options {
     word16            noTicketTls12:1;    /* TLS 1.2 server won't send ticket */
 #ifdef WOLFSSL_TLS13
     word16            noTicketTls13:1;    /* Server won't create new Ticket */
+#ifdef WOLFSSL_EARLY_DATA
+    word16            ticketPredatesCtx:1; /* PSK ticket minted before ctx */
+#endif
 #endif
 #endif
 #ifdef WOLFSSL_DTLS
@@ -5593,6 +5625,10 @@ struct Options {
 
 #ifdef WOLFSSL_EARLY_DATA
     word16            clientInEarlyData:1; /* Client is in wolfSSL_read_early_data */
+#endif
+#if defined(WOLFSSL_TLS13) && !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+    word16            peerSha1CertOk:1;   /* Peer advertised a SHA-1 signature
+                                           * scheme for certificates */
 #endif
 #ifdef WOLFSSL_DTLS
     byte              haveMcast;          /* using multicast ? */
@@ -6201,6 +6237,9 @@ typedef struct BuildMsgArgs {
         byte postHandshakeSendVerify;    /* ssl->options.sendVerify */
         byte postHandshakeSigAlgo;       /* ssl->options.sigAlgo */
         byte postHandshakeHashAlgo;      /* ssl->options.hashAlgo */
+#if !defined(NO_CERTS) && !defined(WOLFSSL_NO_SIGALG)
+        byte postHandshakeSha1CertOk;    /* ssl->options.peerSha1CertOk */
+#endif
         /* After the write side sends the PHA response, it stores its updated
          * transcript here so the read side can resume from it on the next
          * CertificateRequest (keeps client/server transcript in sync). */
@@ -7010,14 +7049,15 @@ struct SystemCryptoPolicy {
 do {                                                                           \
     (err) = wolfSSL_ERR_peek_last_error();                                     \
     if (wolfSSL_ERR_GET_LIB(err) == WOLFSSL_ERR_LIB_PEM &&                     \
-        wolfSSL_ERR_GET_REASON(err) == -WOLFSSL_PEM_R_NO_START_LINE_E) {       \
+        wolfSSL_ERR_GET_REASON(err) ==                                         \
+            -WC_NO_ERR_TRACE(WOLFSSL_PEM_R_NO_START_LINE_E)) {                 \
         unsigned long peekErr;                                                 \
         do {                                                                   \
             wc_RemoveErrorNode(-1);                                            \
             peekErr = wolfSSL_ERR_peek_last_error();                           \
         } while (wolfSSL_ERR_GET_LIB(peekErr) == WOLFSSL_ERR_LIB_PEM &&        \
                  wolfSSL_ERR_GET_REASON(peekErr) ==                            \
-                                              -WOLFSSL_PEM_R_NO_START_LINE_E); \
+                 -WC_NO_ERR_TRACE(WOLFSSL_PEM_R_NO_START_LINE_E));             \
     }                                                                          \
 } while(0)
 #else
@@ -7443,6 +7483,7 @@ WOLFSSL_LOCAL word32 MacSize(const WOLFSSL* ssl);
 
 #ifdef WOLFSSL_TLS13
     WOLFSSL_LOCAL int SendTls13KeyUpdate(WOLFSSL* ssl);
+WOLFSSL_LOCAL int Tls13KeyUpdateLimitReached(WOLFSSL* ssl);
 #endif
 
 #ifdef WOLFSSL_DTLS
@@ -7461,7 +7502,7 @@ WOLFSSL_LOCAL word32 MacSize(const WOLFSSL* ssl);
                                   word32 totalLen, byte encrypted);
     WOLFSSL_TEST_VIS DtlsMsg* DtlsMsgFind(DtlsMsg* head, word16 epoch, word32 seq);
 
-    WOLFSSL_TEST_VIS void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq,
+    WOLFSSL_TEST_VIS int DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq,
                                     const byte* data, word32 dataSz, byte type,
                                     word32 fragOffset, word32 fragSz,
                                     void* heap);

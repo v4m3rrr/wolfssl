@@ -1107,7 +1107,7 @@ fi
 
 # Single Precision maths implementation
 AC_ARG_ENABLE([sp],
-    [AS_HELP_STRING([--enable-sp],[Enable Single Precision maths implementation (default: disabled)])],
+    [AS_HELP_STRING([--enable-sp],[Enable Single Precision maths implementation, comma separated options include small, smallstack, nomalloc, nonblock and notransposedtable (default: disabled)])],
     [ ENABLED_SP=$enableval ],
     [ ENABLED_SP=$ENABLED_SP_DEFAULT ],
     )
@@ -1215,10 +1215,13 @@ if (test "$host_cpu" = "x86_64" || test "$host_cpu" = "amd64") &&
 then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_64_BUILD"
 fi
-if test "$host_cpu" = "x86"
-then
+# config.sub normalises 32-bit x86 to i386/i486/i586/i686, so matching only
+# "x86" never fires for a real host triple.
+case "$host_cpu" in
+  x86 | i?86)
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_X86_BUILD"
-fi
+    ;;
+esac
 
 
 AC_ARG_ENABLE([leanpsk],
@@ -1712,6 +1715,13 @@ then
         # Scrypt is excluded from kernel module builds (unless explicitly
         # enabled) because of its excessive memory requirements.
         test "$enable_scrypt" = "" && test "$enable_hmac" != "no" && enable_scrypt=yes
+        # Argon2 is excluded for the same reason - its memory use is higher
+        # still, and a single contiguous allocation. It is also defined in
+        # terms of BLAKE2b, so only imply it when BLAKE2b has not been turned
+        # off: the user asked for the bundle, not for Argon2, and aborting the
+        # configure over an implied option would be wrong.
+        test "$enable_argon2" = "" && test "$enable_blake2b" != "no" && \
+            test "$enable_blake2" != "no" && enable_argon2=yes
     fi
 
     if test "x$FIPS_VERSION" != "xv1"
@@ -2692,6 +2702,28 @@ then
         ENABLED_SEND_HRR_COOKIE="no"
     else
         AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SEND_HRR_COOKIE"
+    fi
+fi
+
+
+# TLS v1.3 middlebox compatibility (RFC 8446 Appendix D.4)
+AC_ARG_ENABLE([tls13-middlebox-compat],
+    [AS_HELP_STRING([--enable-tls13-middlebox-compat],[Enable TLS v1.3 middlebox compatibility mode (default: disabled)])],
+    [ ENABLED_TLS13_MIDDLEBOX_COMPAT=$enableval ],
+    [ ENABLED_TLS13_MIDDLEBOX_COMPAT=no ]
+    )
+if test "$ENABLED_TLS13_MIDDLEBOX_COMPAT" = "yes"
+then
+    if test "x$ENABLED_TLS13" = "xno"
+    then
+        AC_MSG_NOTICE([TLS 1.3 is disabled - disabling middlebox compatibility])
+        ENABLED_TLS13_MIDDLEBOX_COMPAT="no"
+    elif test "x$ENABLED_ECH" = "xyes"
+    then
+        AC_MSG_NOTICE([ECH is incompatible with middlebox compatibility - disabling middlebox compatibility])
+        ENABLED_TLS13_MIDDLEBOX_COMPAT="no"
+    else
+        AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_TLS13_MIDDLEBOX_COMPAT"
     fi
 fi
 
@@ -4801,11 +4833,12 @@ then
     then
         AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_X86_64_BUILD"
     fi
-    if test "$host_cpu" = "x86"
-    then
+    case "$host_cpu" in
+      x86 | i?86)
         AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_X86_BUILD"
         ENABLED_X86_ASM=yes
-    fi
+        ;;
+    esac
 fi
 AC_SUBST([ENABLED_AESNI])
 AC_SUBST([ENABLED_AESNI_WITH_AVX])
@@ -5186,6 +5219,56 @@ if test "$ENABLED_BLAKE2S" = "yes"
 then
     AM_CFLAGS="$AM_CFLAGS -DHAVE_BLAKE2S"
 fi
+
+
+# ARGON2
+# Placed after BLAKE2 so the dependency below sees a resolved ENABLED_BLAKE2B.
+AC_ARG_ENABLE([argon2],
+    [AS_HELP_STRING([--enable-argon2],[Enable Argon2 password hashing, RFC 9106 (default: disabled)])],
+    [ ENABLED_ARGON2=$enableval ],
+    [ ENABLED_ARGON2=no ]
+    )
+
+if test "$ENABLED_ARGON2" = "yes"
+then
+    # Argon2 is specified in terms of BLAKE2b. Pull BLAKE2b in when the user
+    # simply did not ask for it, but do not silently undo an explicit
+    # --disable-blake2b: that combination cannot be built and saying so is
+    # more useful than quietly ignoring the request.
+    if test "$ENABLED_BLAKE2B" = "no"
+    then
+        if test "x$enable_blake2b" = "xno" || test "x$enable_blake2" = "xno"
+        then
+            AC_MSG_ERROR([cannot enable argon2 without blake2b.])
+        fi
+        ENABLED_BLAKE2B=yes
+        AM_CFLAGS="$AM_CFLAGS -DHAVE_BLAKE2B"
+    fi
+    AM_CFLAGS="$AM_CFLAGS -DHAVE_ARGON2"
+fi
+
+# ARGON2 threading
+# The segments of a slice are independent, so they can be filled in parallel.
+# Requires the wolfSSL threading wrappers, which a single-threaded build does
+# not provide.
+AC_ARG_ENABLE([argon2-threads],
+    [AS_HELP_STRING([--enable-argon2-threads],[Enable Argon2 lane parallelism using threads (default: disabled)])],
+    [ ENABLED_ARGON2_THREADS=$enableval ],
+    [ ENABLED_ARGON2_THREADS=no ]
+    )
+
+if test "$ENABLED_ARGON2_THREADS" = "yes"
+then
+    if test "$ENABLED_ARGON2" = "no"
+    then
+        AC_MSG_ERROR([cannot enable argon2-threads without argon2.])
+    fi
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_ARGON2_THREADS"
+fi
+# The singlethreaded consistency check is deliberately NOT made here: some
+# application bundles turn single-threaded on much later (see the lighttpd
+# block), so a check at this point would miss them. It runs just before the
+# AM_CONDITIONALs instead, by which time ENABLED_SINGLETHREADED is final.
 
 
 # SHA256
@@ -6047,7 +6130,7 @@ fi
 
 # OLD TLS
 AC_ARG_ENABLE([oldtls],
-    [AS_HELP_STRING([--enable-oldtls],[Enable old TLS versions < 1.2 (default: disabled)])],
+    [AS_HELP_STRING([--enable-oldtls],[Enable old TLS versions < 1.2, which RFC 8996 and RFC 9846 forbid negotiating (default: disabled)])],
     [ ENABLED_OLD_TLS=$enableval ],
     [ ENABLED_OLD_TLS=no ]
     )
@@ -8749,6 +8832,23 @@ then
 fi
 
 
+# RNG seed device (best effort, falls back to the default sources)
+AC_ARG_WITH([rng-seed-device],
+    [AS_HELP_STRING([--with-rng-seed-device=PATH],[Seed the RNG from PATH before the default sources, e.g. /dev/hwrng (default: disabled)])],
+    [ RNG_SEED_DEVICE=$withval ],
+    [ RNG_SEED_DEVICE=no ]
+    )
+
+if test "$RNG_SEED_DEVICE" != "no"
+then
+    if test "$RNG_SEED_DEVICE" = "yes"
+    then
+        RNG_SEED_DEVICE="/dev/hwrng"
+    fi
+    AM_CFLAGS="$AM_CFLAGS -DWC_RNG_SEED_DEVICE=\\\"$RNG_SEED_DEVICE\\\""
+fi
+
+
 # Filesystem Build
 if test "$HAVE_KERNEL_MODE" = "yes"
 then
@@ -9623,7 +9723,12 @@ then
     AM_CFLAGS="$AM_CFLAGS -DKEEP_PEER_CERT"
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_ALWAYS_VERIFY_CB"
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_ALWAYS_KEEP_SNI"
-    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_TLS13_MIDDLEBOX_COMPAT"
+    if test "x$ENABLED_ECH" = "xyes"
+    then
+        AC_MSG_NOTICE([ECH is incompatible with middlebox compatibility - not enabling middlebox compatibility for JNI])
+    else
+        AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_TLS13_MIDDLEBOX_COMPAT"
+    fi
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_PUBLIC_MP"
 
     # Enable openssl compat layer AES-CTS to maintain FIPS compatibility
@@ -10914,6 +11019,7 @@ ENABLED_SP_SAKKE_1024=$ENABLED_SAKKE
 ENABLED_SP_NO_MALLOC=no
 ENABLED_SP_NONBLOCK=no
 ENABLED_SP_SMALL=no
+ENABLED_SP_NO_TRANSPOSED_TABLE=no
 for v in `echo $ENABLED_SP | tr "," " "`
 do
   case $v in
@@ -11082,6 +11188,19 @@ do
     ENABLED_SP_NO_MALLOC=yes
     ;;
 
+  transposedtable)
+    # Default.  Base point table lookup reads one byte per block instead of
+    # scanning every entry - faster, but the index is part of the address
+    # within a cache line.
+    ENABLED_SP_NO_TRANSPOSED_TABLE=no
+    ;;
+
+  notransposedtable)
+    # Scan every entry of the base point table instead, so that no address
+    # depends on the index at any granularity.
+    ENABLED_SP_NO_TRANSPOSED_TABLE=yes
+    ;;
+
   nonblock)
     # Requires small and no malloc
     ENABLED_SP_NONBLOCK=yes
@@ -11175,6 +11294,10 @@ fi
 if test "$ENABLED_SP_NO_MALLOC" = "yes"; then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_NO_MALLOC"
     AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_SP_NO_MALLOC"
+fi
+if test "$ENABLED_SP_NO_TRANSPOSED_TABLE" = "yes"; then
+    AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_NO_TRANSPOSED_TABLE"
+    AM_CCASFLAGS="$AM_CCASFLAGS -DWOLFSSL_SP_NO_TRANSPOSED_TABLE"
 fi
 if test "$ENABLED_SP_NONBLOCK" = "yes"; then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_SP_NONBLOCK"
@@ -11509,19 +11632,31 @@ AC_ARG_ENABLE([cryptodev],
 # Support for crypto callbacks
 AC_ARG_ENABLE([cryptocb],
     [AS_HELP_STRING([--enable-cryptocb],
-        [Enable crypto callbacks (default: disabled). Use 'no-default-devid' to enable without a platform-specific default device ID])],
-[
-    case "$enableval" in
+        [Enable crypto callbacks (default: disabled). Use 'only' to also strip the software implementation of every algorithm that has a crypto callback only mode, so all crypto operations are offloaded. Use 'no-default-devid' to enable without a platform-specific default device ID])],
+    [ ENABLED_CRYPTOCB=$enableval ],
+    [ ENABLED_CRYPTOCB=no ])
+
+ENABLED_CRYPTOCB_ONLY=no
+if test "$ENABLED_CRYPTOCB" != "no"
+then
+    for v in `echo $ENABLED_CRYPTOCB | tr "," " "`
+    do
+        case $v in
+        yes)
+            ;;
+        only)
+            ENABLED_CRYPTOCB_ONLY=yes
+            ;;
         no-default-devid)
-            ENABLED_CRYPTOCB=yes
             AM_CPPFLAGS="$AM_CPPFLAGS -DWC_NO_DEFAULT_DEVID"
             ;;
         *)
-            ENABLED_CRYPTOCB="$enableval"
-            ;;
-    esac
-],
-[ ENABLED_CRYPTOCB=no ])
+            AC_MSG_ERROR([Invalid cryptocb option. Valid are: yes, only, no-default-devid or no. Seen: $ENABLED_CRYPTOCB.])
+            break;;
+        esac
+    done
+    ENABLED_CRYPTOCB=yes
+fi
 
 # Enable testing of cryptoCb using software crypto. On platforms where wolfCrypt tests
 # are used to test a custom cryptoCb, it may be desired to disable this so wolfCrypt tests
@@ -11567,6 +11702,44 @@ then
     AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB"
 fi
 
+# Crypto callback only: strip the software implementation of every algorithm
+# that has a crypto callback only mode, so all crypto operations are offloaded.
+# A flag is added only when its algorithm is enabled; the requirement and
+# conflict checks live in wolfssl/wolfcrypt/settings.h, not here.
+if test "$ENABLED_CRYPTOCB_ONLY" = "yes"
+then
+    if test "$ENABLED_SHA256" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_SHA256"
+    fi
+    if test "$ENABLED_SHA512" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_SHA512"
+    fi
+    if test "$ENABLED_AES" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_AES"
+    fi
+    if test "$ENABLED_RSA" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_RSA"
+    fi
+    if test "$ENABLED_ECC" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_ECC"
+    fi
+    if test "$ENABLED_ED25519" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_ED25519"
+    fi
+    if test "$ENABLED_CURVE25519" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_CURVE25519"
+    fi
+    if test "$ENABLED_CURVE448" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_CURVE448"
+    fi
+    if test "$ENABLED_FALCON" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_FALCON"
+    fi
+    if test "$ENABLED_SLHDSA" != "no"; then
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_ONLY_SLHDSA"
+    fi
+fi
+
 if test "$ENABLED_CRYPTOCB_SW_TEST" = "no"
 then
         AM_CFLAGS="$AM_CFLAGS -DWC_TEST_NO_CRYPTOCB_SW_TEST"
@@ -11574,7 +11747,7 @@ fi
 
 # Crypto Callbacks Utils (Copy/Free/etc)
 AC_ARG_ENABLE([cryptocbutils],
-    [AS_HELP_STRING([--enable-cryptocbutils@<:@=copy,free,setkey,export,...@:>@],
+    [AS_HELP_STRING([--enable-cryptocbutils@<:@=copy,free,setkey,export,keystore,...@:>@],
                     [Enable crypto callback utilities (default: all)])],
     [ ENABLED_CRYPTOCB_UTILS=$enableval ],
     [ ENABLED_CRYPTOCB_UTILS=no ]
@@ -11587,7 +11760,7 @@ if test "$ENABLED_CRYPTOCB_UTILS" != "no"; then
 
     if test "$ENABLED_CRYPTOCB_UTILS" = "yes"; then
         # Enable all utilities
-        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_COPY -DWOLF_CRYPTO_CB_FREE -DWOLF_CRYPTO_CB_SETKEY -DWOLF_CRYPTO_CB_EXPORT_KEY"
+        AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_COPY -DWOLF_CRYPTO_CB_FREE -DWOLF_CRYPTO_CB_SETKEY -DWOLF_CRYPTO_CB_EXPORT_KEY -DWOLF_CRYPTO_CB_KEYSTORE"
     else
         # Parse comma-separated list
         OIFS="$IFS"
@@ -11606,8 +11779,11 @@ if test "$ENABLED_CRYPTOCB_UTILS" != "no"; then
                 export)
                     AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_EXPORT_KEY"
                     ;;
+                keystore)
+                    AM_CFLAGS="$AM_CFLAGS -DWOLF_CRYPTO_CB_KEYSTORE"
+                    ;;
                 *)
-                    AC_MSG_ERROR([Unknown cryptocbutils option: $util. Valid options: copy, free, setkey, export])
+                    AC_MSG_ERROR([Unknown cryptocbutils option: $util. Valid options: copy, free, setkey, export, keystore])
                     ;;
             esac
         done
@@ -12976,8 +13152,7 @@ then
 fi
 
 
-# Deprecated Algorithm Handling
-if test "$ENABLED_ARC4" = "yes"
+if test "$ENABLED_ARC4" == "yes"
 then
     AM_CFLAGS="$AM_CFLAGS -DWOLFSSL_ALLOW_RC4"
 fi
@@ -13271,8 +13446,18 @@ AM_CONDITIONAL([BUILD_AFALG],[test "x$ENABLED_AFALG" = "xyes"])
 AM_CONDITIONAL([BUILD_KCAPI],[test "x$ENABLED_KCAPI" = "xyes"])
 AM_CONDITIONAL([BUILD_DEVCRYPTO],[test "x$ENABLED_DEVCRYPTO" = "xyes"])
 AM_CONDITIONAL([BUILD_CAMELLIA],[test "x$ENABLED_CAMELLIA" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
+# Argon2 threading needs the wolfSSL threading wrappers. Checked here rather
+# than where --enable-argon2-threads is parsed because application bundles can
+# still turn single-threaded on after that point.
+if test "$ENABLED_ARGON2_THREADS" = "yes" && \
+   test "$ENABLED_SINGLETHREADED" = "yes"
+then
+    AC_MSG_ERROR([cannot enable argon2-threads with singlethreaded.])
+fi
+
 AM_CONDITIONAL([BUILD_MD2],[test "x$ENABLED_MD2" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_RIPEMD],[test "x$ENABLED_RIPEMD" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
+AM_CONDITIONAL([BUILD_ARGON2],[test "x$ENABLED_ARGON2" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_BLAKE2B],[test "x$ENABLED_BLAKE2B" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_BLAKE2S],[test "x$ENABLED_BLAKE2S" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
 AM_CONDITIONAL([BUILD_SHA512],[test "x$ENABLED_SHA512" = "xyes" || test "x$ENABLED_SHA384" = "xyes" || test "x$ENABLED_USERSETTINGS" = "xyes"])
@@ -13832,6 +14017,8 @@ echo "   * SHAKE256:                   $ENABLED_SHAKE256"
 echo "   * cSHAKE:                     $ENABLED_CSHAKE"
 echo "   * KMAC:                       $ENABLED_KMAC"
 echo "   * SM3:                        $ENABLED_SM3"
+echo "   * ARGON2:                     $ENABLED_ARGON2"
+echo "   * ARGON2 threads:             $ENABLED_ARGON2_THREADS"
 echo "   * BLAKE2B:                    $ENABLED_BLAKE2B"
 echo "   * BLAKE2S:                    $ENABLED_BLAKE2S"
 echo "   * SipHash:                    $ENABLED_SIPHASH"
@@ -14027,6 +14214,7 @@ echo "   * Linux KCAPI:                $ENABLED_KCAPI"
 echo "   * Linux devcrypto:            $ENABLED_DEVCRYPTO"
 echo "   * PK callbacks:               $ENABLED_PKCALLBACKS"
 echo "   * Crypto callbacks:           $ENABLED_CRYPTOCB"
+echo "   * Crypto callbacks only:      $ENABLED_CRYPTOCB_ONLY"
 echo "   * i.MX CAAM:                  $ENABLED_CAAM"
 echo "   * IoT-Safe:                   $ENABLED_IOTSAFE"
 echo "   * WISeKey/SealSQ VaultIC:     $ENABLED_VAULTIC"
@@ -14089,6 +14277,16 @@ fi # $silent != yes
 if test "$MINGW_LIB_WARNING" = "yes"
 then
     AC_MSG_WARN([Building with shared and static library at the same time on this system may cause export/import problems when using non contemporary GNU tools.])
+fi
+
+# Deprecated Algorithm Handling
+if test "$ENABLED_ARC4" = "yes"
+then
+    if test "$ENABLED_TLS" != "no"
+    then
+        echo "---"
+        AC_MSG_NOTICE([RC4 cipher suites are built into this TLS configuration. RFC 7465 prohibits RC4 in TLS, and RFC 8446 Appendix D.5 says a TLS 1.3 capable implementation MUST NOT offer or negotiate RC4 in any protocol version. Use --disable-arc4 unless RC4 is required.])
+    fi
 fi
 
 if test -n "$WITH_MAX_ECC_BITS"; then

@@ -26,7 +26,24 @@
 
 #if defined(WOLFSSL_HAVE_LMS)
 
+#if FIPS_VERSION3_GE(7,0,0)
+    /* the letter d is skipped, codespell rejects it; do not reuse it */
+    #ifdef USE_WINDOWS_API
+        #pragma code_seg(".fipsA$ne")
+        #pragma const_seg(".fipsB$ne")
+    #endif
+#endif
+
 #include <wolfssl/wolfcrypt/wc_lms.h>
+
+#if FIPS_VERSION3_GE(7,0,0)
+    const unsigned int wolfCrypt_FIPS_lms_ro_sanity[2] =
+                                                     { 0x1a2b3c4d, 0x00000022 };
+    int wolfCrypt_FIPS_LMS_sanity(void)
+    {
+        return 0;
+    }
+#endif
 #include <wolfssl/wolfcrypt/hash.h>
 
 #ifdef NO_INLINE
@@ -1210,11 +1227,10 @@ int wc_LmsKey_MakeKey(LmsKey* key, WC_RNG* rng)
         if (key->priv_data == NULL) {
             ret = MEMORY_E;
         }
-    #ifdef WOLFSSL_WC_LMS_SERIALIZE_STATE
         else {
+            /* Loading reads the state before it is computed over. */
             XMEMSET(key->priv_data, 0, priv_data_len);
         }
-    #endif
     }
     if (ret == 0) {
         WC_DECLARE_VAR(state, LmsState, 1, 0);
@@ -1334,6 +1350,10 @@ int wc_LmsKey_Reload(LmsKey* key)
         if (key->priv_data == NULL) {
             ret = MEMORY_E;
         }
+        else {
+            /* Loading reads the state before it is computed over. */
+            XMEMSET(key->priv_data, 0, priv_data_len);
+        }
     }
     if (ret == 0) {
         int rv;
@@ -1446,13 +1466,21 @@ int wc_LmsKey_Sign(LmsKey* key, byte* sig, word32* sigSz, const byte* msg,
 {
     int ret = 0;
 
-    /* Validate parameters. */
+    /* Validate parameters.  A NULL msg is valid for the empty message
+     * (msgSz == 0), per RFC 8554 which permits empty messages. */
     if ((key == NULL) || (key->params == NULL) || (sig == NULL) ||
-            (sigSz == NULL) || (msg == NULL)) {
+            (sigSz == NULL) || ((msg == NULL) && (msgSz != 0))) {
         ret = BAD_FUNC_ARG;
     }
     if ((ret == 0) && (msgSz < 0)) {
         ret = BAD_FUNC_ARG;
+    }
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if ((ret == 0) && (msg == NULL)) {
+        static const byte lms_empty_msg = 0;
+        msg = &lms_empty_msg;
     }
     /* Check state. */
     if ((ret == 0) && (key->state != WC_LMS_STATE_OK)) {
@@ -1917,13 +1945,21 @@ int wc_LmsKey_Verify(LmsKey* key, const byte* sig, word32 sigSz,
 {
     int ret = 0;
 
-    /* Validate parameters. */
+    /* Validate parameters.  A NULL msg is valid for the empty message
+     * (msgSz == 0), per RFC 8554 which permits empty messages. */
     if ((key == NULL) || (key->params == NULL) || (sig == NULL) ||
-            (msg == NULL)) {
+            ((msg == NULL) && (msgSz != 0))) {
         ret = BAD_FUNC_ARG;
     }
     if ((ret == 0) && (msgSz < 0)) {
         ret = BAD_FUNC_ARG;
+    }
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if ((ret == 0) && (msg == NULL)) {
+        static const byte lms_empty_msg = 0;
+        msg = &lms_empty_msg;
     }
     /* Check state. */
     if ((ret == 0) && (key->state != WC_LMS_STATE_OK) &&

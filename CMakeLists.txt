@@ -725,6 +725,32 @@ if("${WOLFSSL_HRR_COOKIE}" STREQUAL "yes")
     endif()
 endif()
 
+# TLS v1.3 middlebox compatibility (RFC 8446 Appendix D.4)
+add_option("WOLFSSL_TLS13_MIDDLEBOX_COMPAT"
+    "Enable TLS v1.3 middlebox compatibility mode (default: disabled)"
+    "no" "yes;no")
+
+if(WOLFSSL_TLS13_MIDDLEBOX_COMPAT)
+    if(NOT WOLFSSL_TLS13)
+        message(WARNING "TLS 1.3 is disabled - disabling middlebox compatibility")
+        override_cache(WOLFSSL_TLS13_MIDDLEBOX_COMPAT "no")
+    else()
+        list(APPEND WOLFSSL_DEFINITIONS
+            "-DWOLFSSL_TLS13_MIDDLEBOX_COMPAT")
+    endif()
+elseif("-DWOLFSSL_TLS13_MIDDLEBOX_COMPAT" IN_LIST WOLFSSL_DEFINITIONS)
+    # A bundle (WOLFSSL_JNI) appends the define straight to the list. Sync the
+    # option with it, otherwise the conflict checks below - ECH - test a
+    # variable that is still "no" and leave both features enabled.
+    if(WOLFSSL_TLS13)
+        override_cache(WOLFSSL_TLS13_MIDDLEBOX_COMPAT "yes")
+    else()
+        message(WARNING "TLS 1.3 is disabled - disabling middlebox compatibility")
+        list(REMOVE_ITEM WOLFSSL_DEFINITIONS
+            "-DWOLFSSL_TLS13_MIDDLEBOX_COMPAT")
+    endif()
+endif()
+
 # DTLS v1.3
 add_option("WOLFSSL_DTLS13"
     "Enable wolfSSL DTLS v1.3 (default: disabled)"
@@ -2772,6 +2798,18 @@ add_option("WOLFSSL_SP_MATH_ALL"
     "Enable Single Precision math implementation for full algorithm suite (default: enabled)"
     "yes" "yes;no")
 
+# SP base point table layout.  The default table is byte transposed: the
+# lookup reads one byte per block rather than scanning every entry, which is
+# faster but makes the load address depend on the secret index within a cache
+# line.  Turn this on to scan the entries instead, so that no address depends
+# on the index at any granularity.
+add_option("WOLFSSL_SP_NO_TRANSPOSED_TABLE"
+    "Disable the transposed Single Precision base point table (default: disabled)"
+    "no" "yes;no")
+if(WOLFSSL_SP_NO_TRANSPOSED_TABLE)
+    list(APPEND WOLFSSL_DEFINITIONS "-DWOLFSSL_SP_NO_TRANSPOSED_TABLE")
+endif()
+
 # Enable examples, used to disable examples
 if(WOLFSSL_LINUX_KM)
     set(EXAMPLES_DEFAULT "no")
@@ -3063,6 +3101,13 @@ if(WOLFSSL_ECH)
         message(FATAL_ERROR "ECH supported only with SNI (WOLFSSL_SNI)")
     endif()
     list(APPEND WOLFSSL_DEFINITIONS "-DHAVE_ECH")
+    if(WOLFSSL_TLS13_MIDDLEBOX_COMPAT)
+        message(WARNING
+            "ECH is incompatible with middlebox compatibility - disabling middlebox compatibility")
+        override_cache(WOLFSSL_TLS13_MIDDLEBOX_COMPAT "no")
+        list(REMOVE_ITEM WOLFSSL_DEFINITIONS
+            "-DWOLFSSL_TLS13_MIDDLEBOX_COMPAT")
+    endif()
 endif()
 
 if(WOLFSSL_KEYING_MATERIAL)
@@ -3266,6 +3311,38 @@ if(WOLFSSL_BLAKE2)
         )
     # generate_build_flags() selects blake2b.c based on WOLFSSL_BLAKE2B.
     set(WOLFSSL_BLAKE2B "yes")
+endif()
+
+add_option("WOLFSSL_ARGON2"
+    "Enable Argon2 password hashing, RFC 9106 (default: disabled)"
+    "no" "yes;no")
+if(WOLFSSL_ARGON2)
+    list(APPEND WOLFSSL_DEFINITIONS
+        "-DHAVE_ARGON2"
+        )
+    # Argon2 is specified in terms of BLAKE2b, so pull it in.
+    if(NOT WOLFSSL_BLAKE2)
+        list(APPEND WOLFSSL_DEFINITIONS
+            "-DHAVE_BLAKE2B"
+            )
+    endif()
+    set(WOLFSSL_BLAKE2B "yes")
+endif()
+
+add_option("WOLFSSL_ARGON2_THREADS"
+    "Enable Argon2 lane parallelism using threads (default: disabled)"
+    "no" "yes;no")
+if(WOLFSSL_ARGON2_THREADS)
+    if(NOT WOLFSSL_ARGON2)
+        message(FATAL_ERROR "WOLFSSL_ARGON2_THREADS requires WOLFSSL_ARGON2")
+    endif()
+    if(WOLFSSL_SINGLE_THREADED)
+        message(FATAL_ERROR
+            "WOLFSSL_ARGON2_THREADS requires a multi-threaded build")
+    endif()
+    list(APPEND WOLFSSL_DEFINITIONS
+        "-DWOLFSSL_ARGON2_THREADS"
+        )
 endif()
 
 add_option("WOLFSSL_BLAKE2S"
@@ -3766,6 +3843,14 @@ set(WOLFSSL_ECC_MIN_KEY_SZ "${WOLFSSL_ECC_MIN_KEY_SZ_DEFAULT}" CACHE STRING
     "Set the ECC minimum key size in bits (default: 224 non-FIPS / 192 FIPS)")
 if(WOLFSSL_ECC AND WOLFSSL_ECC_MIN_KEY_SZ)
     list(APPEND WOLFSSL_DEFINITIONS "-DECC_MIN_KEY_SZ=${WOLFSSL_ECC_MIN_KEY_SZ}")
+endif()
+
+# RNG seed device (best effort, falls back to the default sources)
+set(WOLFSSL_RNG_SEED_DEVICE "" CACHE STRING
+    "Seed the RNG from this device before the default sources, e.g. /dev/hwrng (default: disabled)")
+if(WOLFSSL_RNG_SEED_DEVICE)
+    list(APPEND WOLFSSL_DEFINITIONS
+         "-DWC_RNG_SEED_DEVICE=\"${WOLFSSL_RNG_SEED_DEVICE}\"")
 endif()
 
 
@@ -4461,6 +4546,7 @@ if(WOLFSSL_EXAMPLES)
         tests/api/test_hpke.c
         tests/api/test_kdf.c
         tests/api/test_she.c
+        tests/api/test_keystore.c
         tests/api/test_async.c
         tests/api/test_des3.c
         tests/api/test_chacha.c
@@ -4471,6 +4557,7 @@ if(WOLFSSL_EXAMPLES)
         tests/api/test_rc2.c
         tests/api/test_aes.c
         tests/api/test_ascon.c
+        tests/api/test_argon2.c
         tests/api/test_sm4.c
         tests/api/test_wc_encrypt.c
         tests/api/test_coding.c
@@ -4510,6 +4597,9 @@ if(WOLFSSL_EXAMPLES)
         tests/api/test_evp.c
         tests/api/test_tls_ext.c
         tests/api/test_tls.c
+        tests/api/test_tls_bounds.c
+        tests/api/test_tls_msgtype.c
+        tests/api/test_tls_parse.c
         tests/api/test_session.c
         tests/api/test_x509.c
         tests/api/test_asn.c
@@ -4550,6 +4640,8 @@ if(WOLFSSL_EXAMPLES)
         tests/api/test_evp_pkey.c
         tests/api/test_certman.c
         tests/api/test_tls13.c
+        tests/api/test_tls13_bounds.c
+        tests/api/test_tls13_features.c
         tests/srp.c
         tests/suites.c
         tests/w64wrapper.c

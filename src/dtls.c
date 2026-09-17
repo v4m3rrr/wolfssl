@@ -88,6 +88,16 @@ void DtlsResetState(WOLFSSL* ssl)
     ssl->keys.dtls_sequence_number_hi = 0;
     ssl->keys.dtls_sequence_number_lo = 0;
 
+    /* Forget any alert this object sent for the ClientHello being abandoned.
+     * DoClientHello() can send a fatal alert on the stateless path and then
+     * swallow the error (DtlsIgnoreError) so the object stays up waiting for
+     * the next ClientHello. A leftover alert_fatal in the history makes the
+     * "already sent a more specific fatal alert" guards suppress every later
+     * alert on this object, so a single malformed ClientHello from a spoofed
+     * address would mute alerts for every peer that follows. */
+    ssl->alert_history.last_tx.code  = -1;
+    ssl->alert_history.last_tx.level = -1;
+
     /* Reset states */
     ssl->options.serverState = NULL_STATE;
     ssl->options.clientState = NULL_STATE;
@@ -1339,6 +1349,16 @@ int TLSX_ConnectionID_Parse(WOLFSSL* ssl, const byte* input, word16 length,
     if (cidSz + OPAQUE8_LEN > length)
         return BUFFER_ERROR;
 
+#if DTLS_CID_MAX_SIZE < 255
+    /* The peer's CID becomes our TX CID. RFC 9146 allows up to 255 bytes, our
+     * send buffers are sized for DTLS_CID_MAX_SIZE. */
+    if (cidSz > DTLS_CID_MAX_SIZE) {
+        WOLFSSL_MSG("Peer CID larger than DTLS_CID_MAX_SIZE");
+        WOLFSSL_ERROR_VERBOSE(DTLS_CID_ERROR);
+        return DTLS_CID_ERROR;
+    }
+#endif
+
     info = DtlsCidGetInfo(ssl);
     if (info == NULL)
         return BAD_STATE_E;
@@ -1399,6 +1419,13 @@ void DtlsCIDOnExtensionsParsed(WOLFSSL* ssl)
     }
 }
 
+byte DtlsCIDIsNegotiated(WOLFSSL* ssl)
+{
+    CIDInfo* info = DtlsCidGetInfo(ssl);
+
+    return (byte)(info != NULL && info->negotiated);
+}
+
 byte DtlsCIDCheck(WOLFSSL* ssl, const byte* input, word16 inputSize)
 {
     CIDInfo* info;
@@ -1414,6 +1441,9 @@ int wolfSSL_dtls_cid_use(WOLFSSL* ssl)
 {
     int ret;
 
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
+
     ssl->options.useDtlsCID = 1;
     ret = TLSX_ConnectionID_Use(ssl);
     if (ret != 0)
@@ -1423,6 +1453,8 @@ int wolfSSL_dtls_cid_use(WOLFSSL* ssl)
 
 int wolfSSL_dtls_cid_is_enabled(WOLFSSL* ssl)
 {
+    if (ssl == NULL)
+        return 0;
     return DtlsCidGetInfo(ssl) != NULL;
 }
 
@@ -1430,6 +1462,9 @@ int wolfSSL_dtls_cid_set(WOLFSSL* ssl, unsigned char* cid, unsigned int size)
 {
     ConnectionID* newCid;
     CIDInfo* cidInfo;
+
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
 
     if (!ssl->options.useDtlsCID)
         return WOLFSSL_FAILURE;
@@ -1447,6 +1482,9 @@ int wolfSSL_dtls_cid_set(WOLFSSL* ssl, unsigned char* cid, unsigned int size)
     /* empty CID */
     if (size == 0)
         return WOLFSSL_SUCCESS;
+
+    if (cid == NULL)
+        return BAD_FUNC_ARG;
 
     if (size > DTLS_CID_MAX_SIZE)
         return LENGTH_ERROR;

@@ -3742,6 +3742,16 @@
 #endif /* HAVE_ED448 */
 
 
+/* Derived here rather than in wc_mlkem.h, which is included from inside the
+ * guard that tests this. Names the ASN.1 backend inputs rather than
+ * WOLFSSL_ASN_TEMPLATE, which has no default until several hundred lines down
+ * and so is undefined in CMake builds. Keep in step with that block. */
+#if defined(WOLFSSL_HAVE_MLKEM) && !defined(WOLFSSL_MLKEM_NO_ASN1) && \
+    (defined(NO_ASN) || \
+     (!defined(WOLFSSL_ASN_TEMPLATE) && defined(WOLFSSL_ASN_ORIGINAL)))
+    #define WOLFSSL_MLKEM_NO_ASN1
+#endif
+
 /* RFC 5958 (Asymmetric Key Packages) */
 #if !defined(WC_ENABLE_ASYM_KEY_EXPORT) && \
     ((defined(HAVE_ED25519)    && defined(HAVE_ED25519_KEY_EXPORT)) || \
@@ -3750,6 +3760,7 @@
      (defined(HAVE_CURVE448)   && defined(HAVE_CURVE448_KEY_EXPORT)) || \
       defined(HAVE_FALCON) || defined(HAVE_DILITHIUM) || \
       defined(WOLFSSL_HAVE_FRODOKEM) || \
+     (defined(WOLFSSL_HAVE_MLKEM) && !defined(WOLFSSL_MLKEM_NO_ASN1)) || \
       defined(WOLFSSL_HAVE_SLHDSA) || \
      (defined(WOLFSSL_HAVE_LMS)  && !defined(WOLFSSL_LMS_VERIFY_ONLY)) || \
      (defined(WOLFSSL_HAVE_XMSS) && !defined(WOLFSSL_XMSS_VERIFY_ONLY)))
@@ -3763,6 +3774,7 @@
      (defined(HAVE_CURVE448)   && defined(HAVE_CURVE448_KEY_IMPORT)) || \
       defined(HAVE_FALCON) || defined(HAVE_DILITHIUM) || \
       defined(WOLFSSL_HAVE_FRODOKEM) || \
+     (defined(WOLFSSL_HAVE_MLKEM) && !defined(WOLFSSL_MLKEM_NO_ASN1)) || \
       defined(WOLFSSL_HAVE_SLHDSA) || \
      (defined(WOLFSSL_HAVE_LMS)  && !defined(WOLFSSL_LMS_VERIFY_ONLY)) || \
      (defined(WOLFSSL_HAVE_XMSS) && !defined(WOLFSSL_XMSS_VERIFY_ONLY)))
@@ -5819,6 +5831,17 @@ blinding by defining WC_BLINDING_NO_RNG_ACKNOWLEDGE_WEAKNESS."
     #undef HAVE_BLAKE2
 #endif
 
+/* Argon2 is specified in terms of BLAKE2b (RFC 9106), and argon2.h embeds a
+ * Blake2b in its context, so a build that asks for Argon2 without BLAKE2b
+ * would fail on an unknown type inside a public header - in the application's
+ * build, not the library's. Imply it instead. Must follow the legacy gate
+ * above so that HAVE_BLAKE2 has already been normalized. */
+#ifdef HAVE_ARGON2
+    #ifndef HAVE_BLAKE2B
+        #define HAVE_BLAKE2B
+    #endif
+#endif
+
 /* QUIC Rules */
 #if !defined(WOLFCRYPT_ONLY) && defined(WOLFSSL_QUIC) && \
     !defined(WOLFSSL_TLS13)
@@ -5900,6 +5923,22 @@ blinding by defining WC_BLINDING_NO_RNG_ACKNOWLEDGE_WEAKNESS."
 #if defined(WOLF_CRYPTO_CB_ONLY_CURVE25519) && defined(WOLFSSL_ASYNC_CRYPT)
     #error "WOLF_CRYPTO_CB_ONLY_CURVE25519 is incompatible with " \
            "WOLFSSL_ASYNC_CRYPT"
+#endif
+#if defined(WOLF_CRYPTO_CB_ONLY_CURVE448) && !defined(WOLF_CRYPTO_CB)
+    #error "WOLF_CRYPTO_CB_ONLY_CURVE448 requires WOLF_CRYPTO_CB"
+#endif
+#if defined(WOLF_CRYPTO_CB_ONLY_CURVE448) && !defined(HAVE_CURVE448)
+    #error "WOLF_CRYPTO_CB_ONLY_CURVE448 requires HAVE_CURVE448"
+#endif
+#if defined(WOLF_CRYPTO_CB_ONLY_CURVE448) && defined(WOLFSSL_ASYNC_CRYPT)
+    #error "WOLF_CRYPTO_CB_ONLY_CURVE448 is incompatible with " \
+           "WOLFSSL_ASYNC_CRYPT"
+#endif
+#if defined(WOLF_CRYPTO_CB_ONLY_SLHDSA) && !defined(WOLF_CRYPTO_CB)
+    #error "WOLF_CRYPTO_CB_ONLY_SLHDSA requires WOLF_CRYPTO_CB"
+#endif
+#if defined(WOLF_CRYPTO_CB_ONLY_SLHDSA) && !defined(WOLFSSL_HAVE_SLHDSA)
+    #error "WOLF_CRYPTO_CB_ONLY_SLHDSA requires WOLFSSL_HAVE_SLHDSA"
 #endif
 
 /* Early Data / Session Rules */

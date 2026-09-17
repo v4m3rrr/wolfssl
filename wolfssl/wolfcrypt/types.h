@@ -1527,7 +1527,9 @@ enum wc_AlgoType {
     /* async: re-enter a crypto callback device to poll a pending operation so
      * it can complete the work and fill the output buffer (QAT-style). */
     WC_ALGO_TYPE_ASYNC_POLL = 15,
-    WC_ALGO_TYPE_MAX = WC_ALGO_TYPE_ASYNC_POLL
+    /* hardware key store lifecycle: import, export, derive, delete, query */
+    WC_ALGO_TYPE_KEYSTORE = 16,
+    WC_ALGO_TYPE_MAX = WC_ALGO_TYPE_KEYSTORE
 };
 
 /* KDF types */
@@ -1703,8 +1705,24 @@ enum wc_PkType {
     WC_PK_TYPE_RSA_PSS_VERIFY   = 42,
     /* Ed448 sign reuses WC_PK_TYPE_ED448 (12); verify needs its own type. */
     WC_PK_TYPE_ED448_VERIFY     = 43,
+    /* Curve448 shared secret reuses WC_PK_TYPE_CURVE448 (13). */
+    WC_PK_TYPE_CURVE448_KEYGEN   = 44,
+    WC_PK_TYPE_CURVE448_MAKE_PUB = 45,
+    WC_PK_TYPE_CURVE448_GENERIC  = 46,
     #undef _WC_PK_TYPE_MAX
-    #define _WC_PK_TYPE_MAX WC_PK_TYPE_ED448_VERIFY
+    #define _WC_PK_TYPE_MAX WC_PK_TYPE_CURVE448_GENERIC
+#if defined(WOLFSSL_HAVE_MLDSA) || defined(HAVE_FALCON) || \
+    defined(WOLFSSL_HAVE_SLHDSA)
+    /* Internal interface: the caller supplies the already built message
+     * representative rather than message and context. */
+    WC_PK_TYPE_PQC_SIG_SIGN_MSG   = 47,
+    WC_PK_TYPE_PQC_SIG_VERIFY_MSG = 48,
+    /* Seeded key generation. Its own type so a device that cannot derive
+     * from a seed declines instead of generating an unrelated key. */
+    WC_PK_TYPE_PQC_SIG_KEYGEN_SEED = 49,
+    #undef _WC_PK_TYPE_MAX
+    #define _WC_PK_TYPE_MAX WC_PK_TYPE_PQC_SIG_KEYGEN_SEED
+#endif
     WC_PK_TYPE_MAX = _WC_PK_TYPE_MAX
 };
 

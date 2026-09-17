@@ -75,6 +75,15 @@
 
 #include <wolfssl/wolfcrypt/libwolfssl_sources.h>
 
+#ifdef WOLFSSL_HAVE_MLKEM
+
+#if FIPS_VERSION3_GE(7,0,0)
+    #ifdef USE_WINDOWS_API
+        #pragma code_seg(".fipsA$na")
+        #pragma const_seg(".fipsB$na")
+    #endif
+#endif
+
 #ifdef WC_MLKEM_NO_ASM
     #undef USE_INTEL_SPEEDUP
     #undef WOLFSSL_ARMASM
@@ -86,6 +95,9 @@
 #include <wolfssl/wolfcrypt/memory.h>
 #ifdef WOLF_CRYPTO_CB
     #include <wolfssl/wolfcrypt/cryptocb.h>
+#endif
+#ifndef WOLFSSL_MLKEM_NO_ASN1
+    #include <wolfssl/wolfcrypt/asn.h>
 #endif
 
 #ifdef NO_INLINE
@@ -118,7 +130,14 @@
     #error "Cannot use dynamic key buffers without malloc"
 #endif
 
-#ifdef WOLFSSL_HAVE_MLKEM
+#if FIPS_VERSION3_GE(7,0,0)
+    const unsigned int wolfCrypt_FIPS_mlkem_ro_sanity[2] =
+                                                     { 0x1a2b3c4d, 0x00000019 };
+    int wolfCrypt_FIPS_MLKEM_sanity(void)
+    {
+        return 0;
+    }
+#endif
 
 #ifdef DEBUG_MLKEM
 void print_polys(const char* name, const sword16* a, int d1, int d2);
@@ -427,6 +446,9 @@ int wc_MlKemKey_Init(MlKemKey* key, int type, void* heap, int devId)
         #endif
             break;
     #endif
+        case WC_ML_KEM_TYPE_UNSET:
+            /* Caller will let a DER decode name the parameter set. */
+            break;
         default:
             /* No other values supported. */
             ret = BAD_FUNC_ARG;
@@ -446,7 +468,9 @@ int wc_MlKemKey_Init(MlKemKey* key, int type, void* heap, int devId)
         key->idLen = 0;
         key->labelLen = 0;
 #endif
-        key->flags = 0;
+        /* A zeroed object reads as WC_ML_KEM_512, so record the difference
+         * here rather than inferring it from the type. */
+        key->flags = (type == WC_ML_KEM_TYPE_UNSET) ? 0 : MLKEM_FLAG_TYPE_SET;
 
     #ifdef WOLFSSL_MLKEM_DYNAMIC_KEYS
         key->priv = NULL;
@@ -591,6 +615,10 @@ int wc_MlKemKey_Free(MlKemKey* key)
         /* Ensure all private data is zeroed. */
         ForceZero(&key->hash, sizeof(key->hash));
         ForceZero(&key->prf, sizeof(key->prf));
+#ifdef WOLF_CRYPTO_CB
+        key->hash.devId = INVALID_DEVID;
+        key->prf.devId = INVALID_DEVID;
+#endif
 #ifdef WOLFSSL_MLKEM_DYNAMIC_KEYS
         if (key->priv != NULL) {
             ForceZero(key->priv, key->privAllocSz);
@@ -615,6 +643,12 @@ int wc_MlKemKey_Free(MlKemKey* key)
 
         /* Clear flags as values are no longer set. */
         key->flags = 0;
+#ifdef WOLF_CRYPTO_CB
+        /* Mark the key as having no device so a second free does not call
+         * out to it again. */
+        key->devCtx = NULL;
+        key->devId = INVALID_DEVID;
+#endif
     }
 
     return 0;
@@ -697,61 +731,10 @@ int wc_MlKemKey_MakeKey(MlKemKey* key, WC_RNG* rng)
         ret = wc_MlKemKey_MakeKeyWithRandom(key, rand, sizeof(rand));
     }
 
-#ifdef HAVE_FIPS
-    /* Pairwise Consistency Test (PCT) per FIPS 140-3 / ISO 19790:2012
-     * Section 7.10.3.3: encapsulate with ek, decapsulate with dk,
-     * verify shared secrets match. */
-    if (ret == 0) {
-        WC_DECLARE_VAR(pct_ct, byte, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE,
-            key->heap);
-        byte pct_ss1[WC_ML_KEM_SS_SZ];
-        byte pct_ss2[WC_ML_KEM_SS_SZ];
-        word32 ctSz = 0;
-
-        WC_ALLOC_VAR_EX(pct_ct, byte, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE,
-            key->heap, DYNAMIC_TYPE_TMP_BUFFER, ret = MEMORY_E);
-
-        /* pct_ss1/pct_ss2 hold the PCT shared secrets; baseline-zero and
-         * register up front (single-exit block). */
-#ifdef WOLFSSL_CHECK_MEM_ZERO
-        XMEMSET(pct_ss1, 0, sizeof(pct_ss1));
-        XMEMSET(pct_ss2, 0, sizeof(pct_ss2));
-        wc_MemZero_Add("mlkem pct ss1", pct_ss1, sizeof(pct_ss1));
-        wc_MemZero_Add("mlkem pct ss2", pct_ss2, sizeof(pct_ss2));
-#endif
-        if (ret == 0)
-            ret = wc_MlKemKey_CipherTextSize(key, &ctSz);
-
-        if (ret == 0)
-            ret = wc_MlKemKey_Encapsulate(key, pct_ct, pct_ss1, rng);
-
-        if (ret == 0)
-            ret = wc_MlKemKey_Decapsulate(key, pct_ss2, pct_ct, ctSz);
-
-        if (ret == 0) {
-            if (XMEMCMP(pct_ss1, pct_ss2, WC_ML_KEM_SS_SZ) != 0)
-                ret = ML_KEM_PCT_E;
-        }
-
-        ForceZero(pct_ss1, sizeof(pct_ss1));
-        ForceZero(pct_ss2, sizeof(pct_ss2));
-#ifdef WOLFSSL_CHECK_MEM_ZERO
-        wc_MemZero_Check(pct_ss1, sizeof(pct_ss1));
-        wc_MemZero_Check(pct_ss2, sizeof(pct_ss2));
-#endif
-        if (WC_VAR_OK(pct_ct))
-            ForceZero(pct_ct, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE);
-
-        WC_FREE_VAR_EX(pct_ct, key->heap, DYNAMIC_TYPE_TMP_BUFFER);
-
-        /* FIPS 140-3 IG 10.3.A (TE10.35.02): a key pair that fails the PCT
-         * must be rendered unusable.  Zeroize the generated key material so
-         * a caller that ignores the return value cannot use it. */
-        if (ret != 0) {
-            wc_MlKemKey_Free(key);
-        }
-    }
-#endif /* HAVE_FIPS */
+    /* No key-pair test here: wc_MlKemKey_MakeKeyWithRandom(), called above,
+     * already runs it on every generation path.  Guarded on the version, not
+     * HAVE_FIPS: src/include.am only compiles this file under
+     * BUILD_FIPS_V7_PLUS, so the two are equivalent here. */
 
     /* Ensure seeds are zeroized. */
     ForceZero((void*)rand, (word32)sizeof(rand));
@@ -798,6 +781,8 @@ int wc_MlKemKey_MakeKey(MlKemKey* key, WC_RNG* rng)
  * @return  NOT_COMPILED_IN when key type is not supported.
  * @return  MEMORY_E when dynamic memory allocation failed.
  * @return  BAD_COND_E when fault attack detected.
+ * @return  ML_KEM_PCT_E when the key pair fails its consistency test.  The
+ *          key is freed in that case and must be re-initialised before reuse.
  */
 int wc_MlKemKey_MakeKeyWithRandom(MlKemKey* key, const unsigned char* rand,
     int len)
@@ -845,7 +830,8 @@ int wc_MlKemKey_MakeKeyWithRandom(MlKemKey* key, const unsigned char* rand,
     }
 
     if (ret == 0) {
-        key->flags = 0;
+        /* Discards the key material, not the parameter set. */
+        key->flags &= MLKEM_FLAG_TYPE_SET;
 
         /* Establish parameters based on key type. */
         k = mlkemkey_get_k(key);
@@ -1032,8 +1018,92 @@ int wc_MlKemKey_MakeKeyWithRandom(MlKemKey* key, const unsigned char* rand,
 #endif
 #endif
 
-    /* Note: PCT is performed in wc_MlKemKey_MakeKey() which calls this
-     * function and has the RNG parameter needed for encapsulation. */
+/* ML-KEM, ML-DSA, SLH-DSA, LMS and XMSS were never FIPS approved before the v7
+ * module, so this test stays gated on v7 and must never be widened to plain
+ * HAVE_FIPS.  WOLFSSL_VALIDATE_MLKEM_KEYGEN opts a non-FIPS build in, off by
+ * default. */
+#if FIPS_VERSION3_GE(7,0,0) || defined(WOLFSSL_VALIDATE_MLKEM_KEYGEN)
+#if defined(WOLFSSL_MLKEM_NO_ENCAPSULATE) || defined(WOLFSSL_MLKEM_NO_DECAPSULATE)
+    #error "ML-KEM key generation needs encapsulate and decapsulate for the \
+key-pair test required by ISO/IEC 19790:2012 sec 7.10.3.3"
+#endif
+    /* Test every new key pair: encapsulate with it, decapsulate with it, and
+     * check the shared secrets match.  ISO/IEC 19790:2012 sec 7.10.3.3;
+     * FIPS 140-3 IG 10.3.A Additional Comment 1 spells this test out for
+     * FIPS 203.  Fixed `m` because this path takes no RNG, and a self-test
+     * needs a working round trip, not an unpredictable one. */
+    if (ret == 0) {
+        WC_DECLARE_VAR(pct_ct, byte, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE,
+            key->heap);
+        byte pct_ss1[WC_ML_KEM_SS_SZ];
+        byte pct_ss2[WC_ML_KEM_SS_SZ];
+        word32 pct_ctSz = 0;
+        /* Fixed test pattern for the FIPS 203 Alg 17 `m` input; the value is
+         * arbitrary - a PCT roundtrip does not require unpredictability. */
+        static const byte pct_m[WC_ML_KEM_ENC_RAND_SZ] = {
+            0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+            0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+            0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+            0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB
+        };
+
+        WC_ALLOC_VAR_EX(pct_ct, byte, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE,
+            key->heap, DYNAMIC_TYPE_TMP_BUFFER, ret = MEMORY_E);
+
+        /* Zero and register the shared secrets up front so the leak checker
+         * covers them for the whole block. */
+#ifdef WOLFSSL_CHECK_MEM_ZERO
+        XMEMSET(pct_ss1, 0, sizeof(pct_ss1));
+        XMEMSET(pct_ss2, 0, sizeof(pct_ss2));
+        wc_MemZero_Add("mlkem pct ss1", pct_ss1, sizeof(pct_ss1));
+        wc_MemZero_Add("mlkem pct ss2", pct_ss2, sizeof(pct_ss2));
+        /* Register the ciphertext too, so an early exit added later between
+         * here and the ForceZero below is caught the same way. */
+        if (WC_VAR_OK(pct_ct))
+            wc_MemZero_Add("mlkem pct ct", pct_ct,
+                WC_ML_KEM_MAX_CIPHER_TEXT_SIZE);
+#endif
+        if (ret == 0)
+            ret = wc_MlKemKey_CipherTextSize(key, &pct_ctSz);
+
+        if (ret == 0)
+            ret = wc_MlKemKey_EncapsulateWithRandom(key, pct_ct, pct_ss1,
+                pct_m, (int)sizeof(pct_m));
+
+        if (ret == 0)
+            ret = wc_MlKemKey_Decapsulate(key, pct_ss2, pct_ct, pct_ctSz);
+
+        if (ret == 0) {
+            if (XMEMCMP(pct_ss1, pct_ss2, WC_ML_KEM_SS_SZ) != 0)
+                ret = ML_KEM_PCT_E;
+        }
+
+        ForceZero(pct_ss1, sizeof(pct_ss1));
+        ForceZero(pct_ss2, sizeof(pct_ss2));
+#ifdef WOLFSSL_CHECK_MEM_ZERO
+        wc_MemZero_Check(pct_ss1, sizeof(pct_ss1));
+        wc_MemZero_Check(pct_ss2, sizeof(pct_ss2));
+#endif
+        if (WC_VAR_OK(pct_ct)) {
+            ForceZero(pct_ct, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE);
+        #ifdef WOLFSSL_CHECK_MEM_ZERO
+            /* Must run before the free, or the registration outlives the
+             * allocation. */
+            wc_MemZero_Check(pct_ct, WC_ML_KEM_MAX_CIPHER_TEXT_SIZE);
+        #endif
+        }
+
+        WC_FREE_VAR_EX(pct_ct, key->heap, DYNAMIC_TYPE_TMP_BUFFER);
+
+        /* Free a key that failed the test, so a caller ignoring the return
+         * value cannot use it.  ISO/IEC 19790:2012 sec 7.10.1 forbids using
+         * anything that failed a self-test.  MEMORY_E is excluded: it
+         * means the test never ran, so the key is not implicated. */
+        if ((ret != 0) && (ret != WC_NO_ERR_TRACE(MEMORY_E))) {
+            wc_MlKemKey_Free(key);
+        }
+    }
+#endif /* FIPS v7 or WOLFSSL_VALIDATE_MLKEM_KEYGEN */
 
     return ret;
 }
@@ -2794,5 +2864,433 @@ int wc_MlKemKey_EncodePublicKey(MlKemKey* key, unsigned char* out, word32 len)
 
     return ret;
 }
+
+#ifndef WOLFSSL_MLKEM_NO_ASN1
+#if defined(WC_ENABLE_ASYM_KEY_EXPORT) || defined(WC_ENABLE_ASYM_KEY_IMPORT)
+
+/* Map an ML-KEM key type to its FIPS 203 key-OID sum.
+ *
+ * @param  [in]   type    ML-KEM key type (WC_ML_KEM_512/768/1024).
+ * @param  [out]  oidSum  OID sum (ML_KEM_512k/768k/1024k).
+ * @return  0 on success.
+ * @return  BAD_FUNC_ARG when the type is not an ML-KEM parameter set.
+ */
+static int mlkem_type_to_oid_sum(int type, int* oidSum)
+{
+    int ret = 0;
+
+    switch (type) {
+        case WC_ML_KEM_512:
+            *oidSum = ML_KEM_512k;
+            break;
+        case WC_ML_KEM_768:
+            *oidSum = ML_KEM_768k;
+            break;
+        case WC_ML_KEM_1024:
+            *oidSum = ML_KEM_1024k;
+            break;
+        default:
+            /* Kyber round-3 types have no standardised OID. */
+            ret = BAD_FUNC_ARG;
+            break;
+    }
+
+    return ret;
+}
+
+#endif /* WC_ENABLE_ASYM_KEY_EXPORT || WC_ENABLE_ASYM_KEY_IMPORT */
+
+/* Map an ML-KEM key-OID sum to its parameter set.
+ *
+ * The inverse of mlkem_type_to_oid_sum, for callers that already hold the OID
+ * and want to pin the key to it rather than let a decode adopt one.
+ *
+ * @param  [in]   oidSum  OID sum (ML_KEM_512k/768k/1024k).
+ * @param  [out]  type    ML-KEM key type (WC_ML_KEM_512/768/1024).
+ * @return  0 on success.
+ * @return  BAD_FUNC_ARG when type is NULL or the OID is not an ML-KEM key OID.
+ */
+int mlkem_type_from_oid_sum(int oidSum, int* type)
+{
+    int ret = 0;
+
+    if (type == NULL)
+        return BAD_FUNC_ARG;
+
+    switch (oidSum) {
+        case ML_KEM_512k:
+            *type = WC_ML_KEM_512;
+            break;
+        case ML_KEM_768k:
+            *type = WC_ML_KEM_768;
+            break;
+        case ML_KEM_1024k:
+            *type = WC_ML_KEM_1024;
+            break;
+        default:
+            ret = BAD_FUNC_ARG;
+            break;
+    }
+
+    return ret;
+}
+
+#ifdef WC_ENABLE_ASYM_KEY_EXPORT
+/* Encode the ML-KEM public key as a DER SubjectPublicKeyInfo.
+ *
+ * Pass NULL for output to get the size of the encoding.
+ *
+ * @param  [in]   key      ML-KEM key object with public key set.
+ * @param  [out]  output   Buffer for the DER, or NULL to get the length.
+ * @param  [in]   len      Size of output buffer in bytes.
+ * @param  [in]   withAlg  Include the SubjectPublicKeyInfo wrapper (1) or emit
+ *                         only the raw public key bytes (0).
+ * @return  Length of the encoding in bytes on success.
+ * @return  BAD_FUNC_ARG when key is NULL or the type has no OID.
+ * @return  MEMORY_E when dynamic memory allocation fails.
+ */
+int wc_MlKemKey_PublicKeyToDer(MlKemKey* key, byte* output, word32 len,
+    int withAlg)
+{
+    int ret = 0;
+    int oidSum = 0;
+    word32 pubLen = 0;
+    int sz = 0;
+
+    if (key == NULL)
+        return BAD_FUNC_ARG;
+
+    if (ret == 0) {
+        ret = mlkem_type_to_oid_sum(key->type, &oidSum);
+    }
+    if (ret == 0) {
+        ret = wc_MlKemKey_PublicKeySize(key, &pubLen);
+    }
+    if (ret == 0) {
+        /* Length of the encoding. pubKey is only read when output is given,
+         * so any non-NULL pointer satisfies the argument check here. */
+        sz = SetAsymKeyDerPublic((const byte*)key, pubLen, NULL, 0, oidSum,
+            withAlg);
+        if (sz < 0)
+            ret = sz;
+    }
+    if ((ret == 0) && (output != NULL)) {
+        if (len < (word32)sz) {
+            ret = BUFFER_E;
+        }
+        else {
+            /* The raw key is the last field of the encoding, so write it
+             * where it will live and let the header be built around it. That
+             * is what removes the temporary, and with it the need for a heap
+             * in a WOLFSSL_NO_MALLOC build. */
+            ret = wc_MlKemKey_EncodePublicKey(key,
+                output + ((word32)sz - pubLen), pubLen);
+        }
+    }
+    if ((ret == 0) && (output != NULL)) {
+        ret = SetAsymKeyDerPublic(output + ((word32)sz - pubLen), pubLen,
+            output, len, oidSum, withAlg);
+    }
+    else if (ret == 0) {
+        ret = sz;
+    }
+
+    return ret;
+}
+
+/* Encode the ML-KEM private key as a DER PKCS#8 OneAsymmetricKey.
+ *
+ * The expanded decapsulation key is emitted. The seed and seed-with-expanded
+ * alternatives of the ML-KEM private key are not produced.
+ *
+ * Pass NULL for output to get the size of the encoding.
+ *
+ * @param  [in]   key     ML-KEM key object with private key set.
+ * @param  [out]  output  Buffer for the DER, or NULL to get the length.
+ * @param  [in]   len     Size of output buffer in bytes.
+ * @return  Length of the encoding in bytes on success.
+ * @return  BAD_FUNC_ARG when key is NULL or the type has no OID.
+ * @return  MEMORY_E when dynamic memory allocation fails.
+ */
+int wc_MlKemKey_PrivateKeyToDer(MlKemKey* key, byte* output, word32 len)
+{
+    int ret = 0;
+    int oidSum = 0;
+    word32 privLen = 0;
+    int sz = 0;
+
+    if (key == NULL)
+        return BAD_FUNC_ARG;
+
+    if (ret == 0) {
+        ret = mlkem_type_to_oid_sum(key->type, &oidSum);
+    }
+    if (ret == 0) {
+        ret = wc_MlKemKey_PrivateKeySize(key, &privLen);
+    }
+    if (ret == 0) {
+        /* Length of the encoding. privKey is only read when output is given,
+         * so any non-NULL pointer satisfies the argument check here. The
+         * ML-KEM private key embeds the public key, so none is appended. */
+        sz = SetAsymKeyDer((const byte*)key, privLen, NULL, 0, NULL, 0,
+            oidSum);
+        if (sz < 0)
+            ret = sz;
+    }
+    if ((ret == 0) && (output != NULL)) {
+        if (len < (word32)sz) {
+            ret = BUFFER_E;
+        }
+        else {
+            /* Written where it will live, so the header is built around it
+             * and no temporary is needed. See wc_MlKemKey_PublicKeyToDer. */
+            ret = wc_MlKemKey_EncodePrivateKey(key,
+                output + ((word32)sz - privLen), privLen);
+        }
+    }
+    if ((ret == 0) && (output != NULL)) {
+        ret = SetAsymKeyDer(output + ((word32)sz - privLen), privLen, NULL, 0,
+            output, len, oidSum);
+    }
+    else if (ret == 0) {
+        ret = sz;
+    }
+
+    return ret;
+}
+#endif /* WC_ENABLE_ASYM_KEY_EXPORT */
+
+#ifdef WC_ENABLE_ASYM_KEY_IMPORT
+/* Take the parameter set from a DER algorithm OID sum.
+ *
+ * @param  [in, out]  key     ML-KEM key object with no parameter set yet.
+ * @param  [in]       oidSum  Key OID sum read from the DER.
+ * @return  0 on success.
+ * @return  BAD_FUNC_ARG when the OID is not an ML-KEM key OID.
+ * @return  NOT_COMPILED_IN when the parameter set is not in this build.
+ */
+static int mlkem_key_adopt_type(MlKemKey* key, int oidSum)
+{
+    int type = 0;
+    int ret = mlkem_type_from_oid_sum(oidSum, &type);
+
+    if (ret == 0) {
+        switch (type) {
+#ifndef WOLFSSL_NO_ML_KEM
+    #ifdef WOLFSSL_WC_ML_KEM_512
+        case WC_ML_KEM_512:
+            break;
+    #endif
+    #ifdef WOLFSSL_WC_ML_KEM_768
+        case WC_ML_KEM_768:
+            break;
+    #endif
+    #ifdef WOLFSSL_WC_ML_KEM_1024
+        case WC_ML_KEM_1024:
+            break;
+    #endif
+#endif
+        default:
+            ret = NOT_COMPILED_IN;
+            break;
+        }
+    }
+    if (ret == 0) {
+        key->type = type;
+        key->flags |= MLKEM_FLAG_TYPE_SET;
+    }
+
+    return ret;
+}
+
+/* Decode a DER SubjectPublicKeyInfo into an ML-KEM public key.
+ *
+ * Takes wrapped DER, unlike wc_MlKemKey_DecodePublicKey which takes the raw
+ * encoded key. A key initialized for a parameter set holds the DER to it; one
+ * initialized WC_ML_KEM_TYPE_UNSET takes it from the algorithm OID.
+ *
+ * @param  [in, out]  key       ML-KEM key object.
+ * @param  [in]       input     DER buffer.
+ * @param  [in]       inSz      Size of DER buffer in bytes.
+ * @param  [in, out]  inOutIdx  On in, index into buffer; on out, index after.
+ * @return  0 on success.
+ * @return  BAD_FUNC_ARG when a pointer is NULL.
+ * @return  ASN_PARSE_E when the DER is invalid or names another parameter set.
+ */
+int wc_MlKemKey_PublicKeyDecode(MlKemKey* key, const byte* input, word32 inSz,
+    word32* inOutIdx)
+{
+    int ret = 0;
+    int keyType = ANONk;
+    const byte* pubKey = NULL;
+    word32 pubKeyLen = 0;
+
+    if ((key == NULL) || (input == NULL) || (inOutIdx == NULL)) {
+        ret = BAD_FUNC_ARG;
+    }
+    if ((ret == 0) && ((key->flags & MLKEM_FLAG_TYPE_SET) != 0)) {
+        /* A parameter set was named at init, so hold the DER to it. */
+        ret = mlkem_type_to_oid_sum(key->type, &keyType);
+    }
+    if (ret == 0) {
+        /* keyType is ANONk when none was named, which auto-detects. */
+        ret = DecodeAsymKeyPublic_Assign(input, inOutIdx, inSz, &pubKey,
+            &pubKeyLen, &keyType);
+    }
+    if ((ret == 0) && ((key->flags & MLKEM_FLAG_TYPE_SET) == 0)) {
+        ret = mlkem_key_adopt_type(key, keyType);
+    }
+    if (ret == 0) {
+        ret = wc_MlKemKey_DecodePublicKey(key, pubKey, pubKeyLen);
+    }
+
+    return ret;
+}
+
+/* Decode a DER PKCS#8 OneAsymmetricKey into an ML-KEM private key.
+ *
+ * All three RFC 9935 Section 6 CHOICE shapes are accepted: the 64 byte seed
+ * under an implicit [0], the expanded decapsulation key as an OCTET STRING,
+ * and the SEQUENCE carrying both. A seed is expanded with
+ * ML-KEM.KeyGen_internal(d,z); when both forms are present the expanded key
+ * is regenerated from the seed and the two are compared, per RFC 9935
+ * Section 8. The parameter set must match the initialized key object, as
+ * described for wc_MlKemKey_PublicKeyDecode.
+ *
+ * A WOLFSSL_MLKEM_NO_MAKE_KEY build cannot expand a seed, so it cannot run
+ * the Section 8 check either and rejects any key carrying one, including the
+ * "both" shape.
+ *
+ * @param  [in, out]  key       ML-KEM key object.
+ * @param  [in]       input     DER buffer.
+ * @param  [in]       inSz      Size of DER buffer in bytes.
+ * @param  [in, out]  inOutIdx  On in, index into buffer; on out, index after.
+ * @return  0 on success.
+ * @return  BAD_FUNC_ARG when a pointer is NULL.
+ * @return  ASN_PARSE_E when the DER is invalid, names another parameter set,
+ *          carries a seed that is not 64 bytes, or carries a seed and an
+ *          expanded key that disagree.
+ * @return  MEMORY_E when dynamic memory allocation fails.
+ * @return  NOT_COMPILED_IN when a key carrying a seed is decoded in a
+ *          WOLFSSL_MLKEM_NO_MAKE_KEY build.
+ */
+int wc_MlKemKey_PrivateKeyDecode(MlKemKey* key, const byte* input, word32 inSz,
+    word32* inOutIdx)
+{
+    int ret = 0;
+    int keyType = ANONk;
+    const byte* seed = NULL;
+    word32 seedLen = 0;
+    const byte* privKey = NULL;
+    word32 privKeyLen = 0;
+    const byte* pubKey = NULL;
+    word32 pubKeyLen = 0;
+#ifndef WOLFSSL_MLKEM_NO_MAKE_KEY
+    int keyExpanded = 0;
+#endif
+
+    if ((key == NULL) || (input == NULL) || (inOutIdx == NULL)) {
+        ret = BAD_FUNC_ARG;
+    }
+    if ((ret == 0) && ((key->flags & MLKEM_FLAG_TYPE_SET) != 0)) {
+        /* A parameter set was named at init, so hold the DER to it. */
+        ret = mlkem_type_to_oid_sum(key->type, &keyType);
+    }
+    if (ret == 0) {
+        /* RFC 9935 Section 6 gives privateKey three CHOICE shapes: a 64 byte
+         * seed under an implicit [0], the expanded key as an OCTET STRING, or
+         * a SEQUENCE carrying both. The template decoder reports which. */
+        ret = DecodeAsymKey_Assign(input, inOutIdx, inSz, &seed, &seedLen,
+            &privKey, &privKeyLen, &pubKey, &pubKeyLen, &keyType);
+    }
+    if ((ret == 0) && ((key->flags & MLKEM_FLAG_TYPE_SET) == 0)) {
+        ret = mlkem_key_adopt_type(key, keyType);
+    }
+#ifdef WOLFSSL_MLKEM_NO_MAKE_KEY
+    /* Expanding a seed needs key generation, which this build lacks. That
+     * rules out the "both" shape too: without the RFC 9935 Section 8
+     * comparison, trusting the expanded half would accept a tampered file. */
+    if ((ret == 0) && (seed != NULL)) {
+        WOLFSSL_MSG("ML-KEM seed needs key generation, which is not built");
+        ret = NOT_COMPILED_IN;
+    }
+    if (ret == 0) {
+        ret = wc_MlKemKey_DecodePrivateKey(key, privKey, privKeyLen);
+    }
+#else
+    if ((ret == 0) && (seed != NULL)) {
+        if (seedLen != WC_ML_KEM_MAKEKEY_RAND_SZ) {
+            ret = ASN_PARSE_E;
+        }
+        else {
+            /* Expand with ML-KEM.KeyGen_internal(d,z), FIPS 203 algorithm 16,
+             * taking the first 32 octets as d and the rest as z. */
+            ret = wc_MlKemKey_MakeKeyWithRandom(key, seed, (int)seedLen);
+            if (ret == 0) {
+                keyExpanded = 1;
+            }
+        }
+    }
+    if ((ret == 0) && (seed != NULL) && (privKey != NULL)) {
+        /* The "both" shape. RFC 9935 Section 8: regenerate the expanded form
+         * from the seed and reject the key when the two disagree. */
+        byte* expanded = NULL;
+        word32 expandedLen = 0;
+
+        ret = wc_MlKemKey_PrivateKeySize(key, &expandedLen);
+        if ((ret == 0) && (expandedLen != privKeyLen)) {
+            ret = ASN_PARSE_E;
+        }
+        if (ret == 0) {
+            expanded = (byte*)XMALLOC(expandedLen, key->heap,
+                DYNAMIC_TYPE_TMP_BUFFER);
+            if (expanded == NULL) {
+                ret = MEMORY_E;
+            }
+        }
+        if (ret == 0) {
+            ret = wc_MlKemKey_EncodePrivateKey(key, expanded, expandedLen);
+        }
+        if (ret == 0) {
+            if (XMEMCMP(expanded, privKey, expandedLen) != 0) {
+                WOLFSSL_MSG("ML-KEM seed and expandedKey disagree");
+                ret = ASN_PARSE_E;
+            }
+        }
+        if (expanded != NULL) {
+            ForceZero(expanded, expandedLen);
+            XFREE(expanded, key->heap, DYNAMIC_TYPE_TMP_BUFFER);
+        }
+    }
+    if ((ret != 0) && keyExpanded) {
+        /* The seed was expanded before it could be checked, so scrub it; a
+         * failure must not leave a usable private key behind. Gated on the
+         * expansion having run, not on seed != NULL: a wrong-length seed never
+         * reaches it, and priv may still be NULL under DYNAMIC_KEYS. */
+    #ifdef WOLFSSL_MLKEM_DYNAMIC_KEYS
+        if (key->priv != NULL) {
+            ForceZero(key->priv, key->privAllocSz);
+        }
+    #else
+        int scrubK = mlkemkey_get_k(key);
+
+        if (scrubK != 0) {
+            ForceZero(key->priv,
+                (size_t)scrubK * MLKEM_N * sizeof(sword16));
+        }
+    #endif
+        ForceZero(key->z, WC_ML_KEM_SYM_SZ);
+        key->flags &= MLKEM_FLAG_TYPE_SET;
+    }
+    else if ((ret == 0) && (seed == NULL)) {
+        ret = wc_MlKemKey_DecodePrivateKey(key, privKey, privKeyLen);
+    }
+#endif /* WOLFSSL_MLKEM_NO_MAKE_KEY */
+
+    return ret;
+}
+#endif /* WC_ENABLE_ASYM_KEY_IMPORT */
+
+#endif /* !WOLFSSL_MLKEM_NO_ASN1 */
 
 #endif /* WOLFSSL_HAVE_MLKEM */

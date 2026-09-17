@@ -320,10 +320,27 @@ static int ed25519_pairwise_consistency_test(ed25519_key* key, WC_RNG* rng)
 }
 #endif
 
+/* Mirror a derived public key into the key structure itself, leaving the same
+ * layout wc_ed25519_make_key() does: the compressed point in key->p and a copy
+ * in the second half of key->k.  Only called when the key had no public half
+ * yet, so an existing public key is never overwritten - deriving into a
+ * scratch buffer and comparing against key->p is how wc_ed25519_check_key()
+ * validates a keypair.
+ */
+static void ed25519_store_public(ed25519_key* key, const byte* pubKey)
+{
+    if (pubKey != key->p) {
+        XMEMCPY(key->p, pubKey, ED25519_PUB_KEY_SIZE);
+    }
+    /* put public key after private key, on the same buffer */
+    XMEMMOVE(key->k + ED25519_KEY_SIZE, key->p, ED25519_PUB_KEY_SIZE);
+}
+
 int wc_ed25519_make_public(ed25519_key* key, unsigned char* pubKey,
                            word32 pubKeySz)
 {
     int   ret = 0;
+    int   storePub = 0;
 #ifndef WOLF_CRYPTO_CB_ONLY_ED25519
     ALIGN16 byte az[ED25519_PRV_KEY_SIZE];
 #if !defined(FREESCALE_LTC_ECC)
@@ -338,6 +355,14 @@ int wc_ed25519_make_public(ed25519_key* key, unsigned char* pubKey,
         ret = ECC_PRIV_KEY_E;
     }
 
+    if (ret == 0) {
+        /* The key doesn't carry its public half yet (e.g. it was decoded from
+         * a PKCS#8 v1 PrivateKeyInfo, which holds only the seed): fill it in
+         * as well, so pubKeySet below doesn't end up set on a key whose p/k
+         * are still empty. */
+        storePub = !key->pubKeySet;
+    }
+
 #ifdef WOLF_CRYPTO_CB
     /* Device-first: offload the public-key derivation. Fall through to the
      * software path below only when the device reports the operation
@@ -350,8 +375,11 @@ int wc_ed25519_make_public(ed25519_key* key, unsigned char* pubKey,
     {
         ret = wc_CryptoCb_Ed25519MakePub(key, pubKey, pubKeySz);
         if (ret != WC_NO_ERR_TRACE(CRYPTOCB_UNAVAILABLE)) {
-            if (ret == 0)
+            if (ret == 0) {
+                if (storePub)
+                    ed25519_store_public(key, pubKey);
                 key->pubKeySet = 1;
+            }
             return ret;
         }
         ret = 0; /* device declined the offload; fall back */
@@ -384,6 +412,8 @@ int wc_ed25519_make_public(ed25519_key* key, unsigned char* pubKey,
         ge_p3_tobytes(pubKey, &A);
     #endif
 
+        if (storePub)
+            ed25519_store_public(key, pubKey);
         key->pubKeySet = 1;
     }
 #endif /* WOLF_CRYPTO_CB_ONLY_ED25519 */
@@ -428,15 +458,14 @@ int wc_ed25519_make_key(WC_RNG* rng, int keySz, ed25519_key* key)
         return ret;
 
     key->privKeySet = 1;
+    /* pubKeySet was just cleared, so this also stores the public key in key->p
+     * and after the private key in key->k */
     ret = wc_ed25519_make_public(key, key->p, ED25519_PUB_KEY_SIZE);
     if (ret != 0) {
         key->privKeySet = 0;
         ForceZero(key->k, ED25519_KEY_SIZE);
         return ret;
     }
-
-    /* put public key after private key, on the same buffer */
-    XMEMMOVE(key->k + ED25519_KEY_SIZE, key->p, ED25519_PUB_KEY_SIZE);
 
 #if FIPS_VERSION3_GE(6,0,0)
     ret = wc_ed25519_check_key(key);
@@ -478,9 +507,16 @@ int wc_ed25519_sign_msg_ex(const byte* in, word32 inLen, byte* out,
     (void)ed25519Ctx;
     ret = WC_NO_ERR_TRACE(CRYPTOCB_UNAVAILABLE);
 
-    if (in == NULL || out == NULL || outLen == NULL || key == NULL ||
-                                         (context == NULL && contextLen != 0)) {
+    if (((in == NULL) && (inLen != 0)) || out == NULL || outLen == NULL ||
+            key == NULL || (context == NULL && contextLen != 0)) {
         return BAD_FUNC_ARG;
+    }
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if (in == NULL) {
+        static const byte ed25519_empty_msg = 0;
+        in = &ed25519_empty_msg;
     }
 
     if ((type == Ed25519ph) &&
@@ -514,9 +550,16 @@ int wc_ed25519_sign_msg_ex(const byte* in, word32 inLen, byte* out,
 #endif
 
     /* sanity check on arguments */
-    if (in == NULL || out == NULL || outLen == NULL || key == NULL ||
-                                         (context == NULL && contextLen != 0)) {
+    if (((in == NULL) && (inLen != 0)) || out == NULL || outLen == NULL ||
+            key == NULL || (context == NULL && contextLen != 0)) {
         return BAD_FUNC_ARG;
+    }
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if (in == NULL) {
+        static const byte ed25519_empty_msg = 0;
+        in = &ed25519_empty_msg;
     }
 
 #if defined(WOLFSSL_SE050) && defined(WOLFSSL_SE050_ONLY_KEY_ID)
@@ -1092,9 +1135,16 @@ int wc_ed25519_verify_msg_ex(const byte* sig, word32 sigLen, const byte* msg,
     (void)ed25519Ctx;
     ret = WC_NO_ERR_TRACE(CRYPTOCB_UNAVAILABLE);
 
-    if (sig == NULL || msg == NULL || res == NULL || key == NULL ||
-                                         (context == NULL && contextLen != 0))
+    if (sig == NULL || ((msg == NULL) && (msgLen != 0)) || res == NULL ||
+            key == NULL || (context == NULL && contextLen != 0))
         return BAD_FUNC_ARG;
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if (msg == NULL) {
+        static const byte ed25519_empty_msg = 0;
+        msg = &ed25519_empty_msg;
+    }
 
     if ((type == Ed25519ph) &&
         (msgLen != WC_SHA512_DIGEST_SIZE))
@@ -1134,9 +1184,16 @@ int wc_ed25519_verify_msg_ex(const byte* sig, word32 sigLen, const byte* msg,
 #endif
 
     /* sanity check on arguments */
-    if (sig == NULL || msg == NULL || res == NULL || key == NULL ||
-                                         (context == NULL && contextLen != 0))
+    if (sig == NULL || ((msg == NULL) && (msgLen != 0)) || res == NULL ||
+            key == NULL || (context == NULL && contextLen != 0))
         return BAD_FUNC_ARG;
+    /* An empty message may be passed as (NULL, 0); canonicalize it to a
+     * readable stand-in so that downstream consumers -- hash updates and
+     * crypto callbacks -- never see a NULL pointer. */
+    if (msg == NULL) {
+        static const byte ed25519_empty_msg = 0;
+        msg = &ed25519_empty_msg;
+    }
 
     if ((type == Ed25519ph) &&
         (msgLen != WC_SHA512_DIGEST_SIZE))

@@ -176,6 +176,19 @@
     #endif
 #endif
 
+/* Marks a function that is only ever reached from a branch inside an inline
+ * assembly string. The compiler does not parse those strings, so it sees no
+ * reference to the function: without this, -flto decides the definition is
+ * unreachable, drops the body, and the branch is left with nothing to bind to
+ * at link time. Costs nothing in a non-LTO build. */
+#ifndef WC_KEEP_FOR_ASM
+    #if defined(__GNUC__) || defined(__clang__)
+        #define WC_KEEP_FOR_ASM __attribute__((used))
+    #else
+        #define WC_KEEP_FOR_ASM
+    #endif
+#endif
+
 /* THREADING/MUTEX SECTION */
 #if defined(SINGLE_THREADED) && defined(NO_FILESYSTEM)
     /* No system headers required for build. */
@@ -2030,6 +2043,15 @@ WOLFSSL_ABI WOLFSSL_API int wolfCrypt_Cleanup(void);
     !defined(WOLFSSL_SGX)
     WOLFSSL_LOCAL void wc_set_cloexec(int fd);
     WOLFSSL_LOCAL int wc_open_cloexec(const char* path, int flags);
+    WOLFSSL_LOCAL int wc_open_cloexec_mode(const char* path, int flags,
+                                           int mode);
+#if !defined(NO_FILESYSTEM)
+    #ifdef XFDOPEN
+        WOLFSSL_LOCAL XFILE wc_fopen_owner_only(const char* path);
+    #else
+        #define wc_fopen_owner_only(path) XFOPEN((path), "w+b")
+    #endif
+#endif
     WOLFSSL_LOCAL int wc_socket_cloexec(int domain, int type, int protocol);
     WOLFSSL_LOCAL int wc_accept_cloexec(int sockfd, void* addr, void* addrlen);
 #else
@@ -2038,6 +2060,11 @@ WOLFSSL_ABI WOLFSSL_API int wolfCrypt_Cleanup(void);
      * syscalls where the underlying headers are available in the caller. */
     #define wc_set_cloexec(fd) ((void)(fd))
     #define wc_open_cloexec(path, flags) open((path), (flags))
+    #define wc_open_cloexec_mode(path, flags, mode) \
+        open((path), (flags), (mode))
+#if !defined(NO_FILESYSTEM)
+    #define wc_fopen_owner_only(path) XFOPEN((path), "w+b")
+#endif
     #define wc_socket_cloexec(domain, type, protocol) \
         socket((domain), (type), (protocol))
     #define wc_accept_cloexec(sockfd, addr, addrlen) \

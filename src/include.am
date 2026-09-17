@@ -115,6 +115,9 @@ if BUILD_AESNI
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_asm.S
 if BUILD_X86_ASM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_x86_asm.S
+if BUILD_AESXTS
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_xts_x86_asm.S
+endif
 else
 if BUILD_AESGCM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_asm.S
@@ -197,10 +200,6 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += \
                wolfcrypt/src/hmac.c \
                wolfcrypt/src/random.c
 
-if BUILD_MEMUSE
-src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfentropy.c
-endif
-
 if BUILD_RNG_BANK
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/rng_bank.c
 endif
@@ -277,6 +276,9 @@ if BUILD_AESNI
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_asm.S
 if BUILD_X86_ASM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_x86_asm.S
+if BUILD_AESXTS
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_xts_x86_asm.S
+endif
 else
 if BUILD_AESGCM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_asm.S
@@ -514,6 +516,15 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/fips.c \
 
 # fips last file
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfcrypt_last.c
+
+# v7+ and v5 only.  Listed after wolfcrypt_last.c so its code sits past
+# wolfCrypt_FIPS_last() and the in-core integrity hash does not cover it.  The
+# module calls out to this entropy source, which is what IG 9.3.A asks for.
+# v6 keeps it inside boundary.
+if BUILD_MEMUSE
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfentropy.c
+endif
+
 endif BUILD_FIPS_V5
 
 if BUILD_FIPS_V6
@@ -613,6 +624,9 @@ if BUILD_AESNI
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_asm.S
 if BUILD_X86_ASM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_x86_asm.S
+if BUILD_AESXTS
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_xts_x86_asm.S
+endif
 else
 if BUILD_AESGCM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_asm.S
@@ -946,10 +960,6 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += \
                wolfcrypt/src/hmac.c \
                wolfcrypt/src/random.c
 
-if BUILD_MEMUSE
-src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfentropy.c
-endif
-
 if BUILD_RNG_BANK
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/rng_bank.c
 endif
@@ -1005,6 +1015,9 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_asm.S
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_x86_64_asm.S
 if BUILD_X86_ASM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_x86_asm.S
+if BUILD_AESXTS
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_xts_x86_asm.S
+endif
 else
 if BUILD_AESGCM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_asm.S
@@ -1376,6 +1389,15 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/fips.c \
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfcrypt_last.c
 
 endif !BUILD_FIPS_NO_POST
+
+# v7+ and v5 only.  Listed after wolfcrypt_last.c so its code sits past
+# wolfCrypt_FIPS_last() and the in-core integrity hash does not cover it.  The
+# module calls out to this entropy source, which is what IG 9.3.A asks for.
+# v6 keeps it inside boundary. Outside the !BUILD_FIPS_NO_POST guard above so
+# --enable-fips=dev-no-post builds it too.
+if BUILD_MEMUSE
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/wolfentropy.c
+endif
 
 endif BUILD_FIPS_V7_PLUS
 
@@ -2009,6 +2031,9 @@ src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_asm.S
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_x86_64_asm.S
 if BUILD_X86_ASM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_x86_asm.S
+if BUILD_AESXTS
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_xts_x86_asm.S
+endif
 else
 if BUILD_AESGCM
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/aes_gcm_asm.S
@@ -2079,6 +2104,10 @@ endif BUILD_CHACHA
 
 if BUILD_ASCON
 src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/ascon.c
+endif
+
+if BUILD_ARGON2
+src_libwolfssl@LIBSUFFIX@_la_SOURCES += wolfcrypt/src/argon2.c
 endif
 
 if BUILD_PUF

@@ -104,7 +104,8 @@
  * WOLFSSL_TLS13_NO_PEEK_HANDSHAKE_DONE:
  *                  Disable peek returning WANT_READ for tickets       default: off
  * WOLFSSL_TLS13_IGNORE_AEAD_LIMITS:
- *                  Ignore AEAD message limits from RFC 8446           default: off
+ *                  Ignore AEAD message limits from RFC 9846 5.5, which
+ *                  makes observing them a MUST                        default: off
  * WOLFSSL_DTLS13_SEND_MOREACK_DEFAULT:
  *                  Send more ACKs by default in DTLS 1.3              default: off
  *
@@ -2654,6 +2655,30 @@ int InitSSL_Ctx(WOLFSSL_CTX* ctx, WOLFSSL_METHOD* method, void* heap)
         ctx->heap = heap; /* wolfSSL_CTX_load_static_memory sets */
     }
     ctx->timeout  = WOLFSSL_SESSION_TIMEOUT;
+
+#if defined(WOLFSSL_TLS13) && defined(WOLFSSL_EARLY_DATA) && \
+    defined(HAVE_SESSION_TICKET) && !defined(NO_TLS)
+    /* RFC 8446 Section 8.2: a freshly started server should reject 0-RTT.
+     * Tickets minted before this time cannot carry early data. Rounded
+     * down to a whole second because stateful tickets only store second
+     * resolution. */
+    ctx->ticketStartTime = TimeNowInMilliseconds();
+    if (ctx->ticketStartTime == 0) {
+        /* TimeNowInMilliseconds() reports failure as 0. Without a reference
+         * point the check cannot run, so turn it off for this ctx. */
+        ctx->noFreshStartCheck = 1;
+    }
+    else {
+        ctx->ticketStartTime -= ctx->ticketStartTime % 1000;
+        /* Drop a further second so a ticket minted in the same second as the
+         * ctx is never flagged as predating it: ticketSeen is read from
+         * LowResTimer() rather than this clock, and a wrapped 32 bit ms clock
+         * keeps its true sub-second part through the modulo above. */
+        if (ctx->ticketStartTime > 1000) {
+            ctx->ticketStartTime -= 1000;
+        }
+    }
+#endif
 
 #if defined(OPENSSL_EXTRA) || defined(WOLFSSL_TLS_READ_AHEAD)
     /* Default the read-ahead window to one full record. Contexts (and the
@@ -7685,6 +7710,7 @@ static int SetSSL_CTX_CertsAndKeys(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
         if (ret != 0) {
             return ret;
         }
+        ssl->buffers.weOwnAltKey = 1;
         /* Blind the private key for the SSL with new random mask. */
         wolfssl_priv_der_blind_toggle(ssl->buffers.altKey,
             ctx->altPrivateKeyMask);
@@ -7705,6 +7731,59 @@ static int SetSSL_CTX_CertsAndKeys(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
     return ret;
 }
 #endif /* NO_CERTS */
+
+#ifndef NO_DH
+/* Give the SSL object its own copy of the context's DH parameters.
+ *
+ * The parameters are plain buffers with no reference count on them, so a
+ * session must not point at the context's: the context is free to replace
+ * them at any time. They are small and only present when the application
+ * asked for them, so a copy is the cheap way to keep them safe. It is given
+ * back at the end of the handshake and taken again when next needed.
+ *
+ * @param [in, out] ssl  SSL object. Any parameters it owns are let go of.
+ * @param [in]      ctx  SSL context object.
+ * @return  0 on success.
+ * @return  MEMORY_E when dynamic memory allocation fails.
+ */
+int CopySSL_CTX_DhParams(WOLFSSL* ssl, WOLFSSL_CTX* ctx)
+{
+    byte* p;
+    byte* g;
+
+    if ((ctx->serverDH_P.buffer == NULL) || (ctx->serverDH_G.buffer == NULL)) {
+        return 0;
+    }
+
+    p = (byte*)XMALLOC(ctx->serverDH_P.length, ssl->heap,
+        DYNAMIC_TYPE_PUBLIC_KEY);
+    g = (byte*)XMALLOC(ctx->serverDH_G.length, ssl->heap,
+        DYNAMIC_TYPE_PUBLIC_KEY);
+    if ((p == NULL) || (g == NULL)) {
+        XFREE(p, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+        XFREE(g, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+        return MEMORY_E;
+    }
+
+    /* Let go of any parameters this object already had. */
+    if (ssl->buffers.weOwnDH) {
+        XFREE(ssl->buffers.serverDH_P.buffer, ssl->heap,
+            DYNAMIC_TYPE_PUBLIC_KEY);
+        XFREE(ssl->buffers.serverDH_G.buffer, ssl->heap,
+            DYNAMIC_TYPE_PUBLIC_KEY);
+    }
+
+    XMEMCPY(p, ctx->serverDH_P.buffer, ctx->serverDH_P.length);
+    XMEMCPY(g, ctx->serverDH_G.buffer, ctx->serverDH_G.length);
+    ssl->buffers.serverDH_P.buffer = p;
+    ssl->buffers.serverDH_P.length = ctx->serverDH_P.length;
+    ssl->buffers.serverDH_G.buffer = g;
+    ssl->buffers.serverDH_G.length = ctx->serverDH_G.length;
+    ssl->buffers.weOwnDH = 1;
+
+    return 0;
+}
+#endif /* !NO_DH */
 
 int SetSSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx, int writeDup)
 {
@@ -7894,8 +7973,9 @@ int SetSSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx, int writeDup)
         !defined(HAVE_SELFTEST)
         ssl->options.dhKeyTested = ctx->dhKeyTested;
     #endif
-    ssl->buffers.serverDH_P = ctx->serverDH_P;
-    ssl->buffers.serverDH_G = ctx->serverDH_G;
+    if (CopySSL_CTX_DhParams(ssl, ctx) != 0) {
+        return MEMORY_E;
+    }
 #endif
 
 #if defined(HAVE_RPK)
@@ -9275,7 +9355,8 @@ int AllocKey(WOLFSSL* ssl, int type, void** pKey)
     #endif /* WOLFSSL_HAVE_SLHDSA */
     #ifdef HAVE_CURVE448
         case DYNAMIC_TYPE_CURVE448:
-            ret = wc_curve448_init((curve448_key*)*pKey);
+            ret = wc_curve448_init_ex((curve448_key*)*pKey, ssl->heap,
+                                      ssl->devId);
             if (ret == 0)
                 key_inited = 1;
             break;
@@ -9373,7 +9454,8 @@ static int ReuseKey(WOLFSSL* ssl, int type, void* pKey)
     #ifdef HAVE_CURVE448
         case DYNAMIC_TYPE_CURVE448:
             wc_curve448_free((curve448_key*)pKey);
-            ret = wc_curve448_init((curve448_key*)pKey);
+            ret = wc_curve448_init_ex((curve448_key*)pKey, ssl->heap,
+                                      ssl->devId);
             break;
     #endif /* HAVE_CURVE448 */
     #if defined(HAVE_FALCON)
@@ -9784,7 +9866,6 @@ void wolfSSL_ResourceFree(WOLFSSL* ssl)
     }
     XFREE(ssl->buffers.serverDH_Priv.buffer, ssl->heap, DYNAMIC_TYPE_PRIVATE_KEY);
     XFREE(ssl->buffers.serverDH_Pub.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
-    /* parameters (p,g) may be owned by ctx */
     if (ssl->buffers.weOwnDH) {
         XFREE(ssl->buffers.serverDH_G.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
         XFREE(ssl->buffers.serverDH_P.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
@@ -10183,11 +10264,14 @@ void FreeHandshakeResources(WOLFSSL* ssl)
     ssl->buffers.serverDH_Priv.buffer = NULL;
     XFREE(ssl->buffers.serverDH_Pub.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
     ssl->buffers.serverDH_Pub.buffer = NULL;
-    /* parameters (p,g) may be owned by ctx */
+    /* Release the parameters (p,g) back here rather than hold them for
+     * the life of the connection. */
     if (ssl->buffers.weOwnDH) {
-        XFREE(ssl->buffers.serverDH_G.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+        XFREE(ssl->buffers.serverDH_G.buffer, ssl->heap,
+            DYNAMIC_TYPE_PUBLIC_KEY);
         ssl->buffers.serverDH_G.buffer = NULL;
-        XFREE(ssl->buffers.serverDH_P.buffer, ssl->heap, DYNAMIC_TYPE_PUBLIC_KEY);
+        XFREE(ssl->buffers.serverDH_P.buffer, ssl->heap,
+            DYNAMIC_TYPE_PUBLIC_KEY);
         ssl->buffers.serverDH_P.buffer = NULL;
     }
 #endif /* !NO_DH */
@@ -10412,6 +10496,30 @@ static WC_INLINE void DtlsSEQIncrement(WOLFSSL* ssl, int order)
         }
     }
 }
+
+#ifndef WOLFSSL_NO_TLS12
+/* Is the send sequence number at its last legal value? DtlsSEQIncrement()
+ * would wrap the word16 high half to 0 and reuse sequence numbers. */
+static WC_INLINE int DtlsSEQAtMax(WOLFSSL* ssl, int order)
+{
+#ifdef HAVE_SECURE_RENEGOTIATION
+    order = DtlsCheckOrder(ssl, order);
+#endif
+
+    if (order == PREV_ORDER) {
+        return ssl->keys.dtls_prev_sequence_number_hi == 0xFFFF &&
+               ssl->keys.dtls_prev_sequence_number_lo == 0xFFFFFFFFU;
+    }
+    else if (order == PEER_ORDER) {
+        /* the peer's sequence number is taken from the record */
+        return 0;
+    }
+    else {
+        return ssl->keys.dtls_sequence_number_hi == 0xFFFF &&
+               ssl->keys.dtls_sequence_number_lo == 0xFFFFFFFFU;
+    }
+}
+#endif /* !WOLFSSL_NO_TLS12 */
 #endif /* WOLFSSL_DTLS */
 
 #if defined(WOLFSSL_DTLS) || !defined(WOLFSSL_NO_TLS12)
@@ -10823,10 +10931,10 @@ int DtlsMsgSet(DtlsMsg* msg, word32 seq, word16 epoch, const byte* data, byte ty
                 }
                 prev->m.m.next =
                         DtlsMsgCreateFragBucket(fragOffset, data, fragSz, heap);
-                if (prev->m.m.next != NULL) {
-                    msg->bytesReceived += fragSz;
-                    msg->fragBucketListCount++;
-                }
+                if (prev->m.m.next == NULL)
+                    return MEMORY_ERROR;
+                msg->bytesReceived += fragSz;
+                msg->fragBucketListCount++;
             }
             else if (fragOffsetEnd < cur->m.m.offset) {
                     /* Fragment is entirely before cur with a gap */
@@ -10847,6 +10955,7 @@ int DtlsMsgSet(DtlsMsg* msg, word32 seq, word16 epoch, const byte* data, byte ty
                     else {
                         /* reset on error */
                         *prev_next = cur;
+                        return MEMORY_ERROR;
                     }
             }
             else {
@@ -10860,8 +10969,11 @@ int DtlsMsgSet(DtlsMsg* msg, word32 seq, word16 epoch, const byte* data, byte ty
                 /* We can combine the buckets */
                 *prev_next = DtlsMsgCombineFragBuckets(msg, cur, next,
                         fragOffset, data, fragSz, heap);
-                if (*prev_next == NULL) /* reset on error */
+                if (*prev_next == NULL) {
+                    /* reset on error */
                     *prev_next = cur;
+                    return MEMORY_ERROR;
+                }
             }
         }
     }
@@ -10883,7 +10995,8 @@ DtlsMsg* DtlsMsgFind(DtlsMsg* head, word16 epoch, word32 seq)
 }
 
 
-void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
+/* Returns 0 when the fragment was stored, negative when it was dropped. */
+int DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
         word32 dataSz, byte type, word32 fragOffset, word32 fragSz, void* heap)
 {
     /* See if seq exists in the list. If it isn't in the list, make
@@ -10905,6 +11018,7 @@ void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
 
     DtlsMsg* head = ssl->dtls_rx_msg_list;
     byte encrypted = ssl->keys.decryptedCur == 1;
+    int ret = 0;
     WOLFSSL_ENTER("DtlsMsgStore");
 
     if (head != NULL) {
@@ -10913,11 +11027,13 @@ void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
             cur = DtlsMsgNew(dataSz, 0, heap);
             if (cur == NULL) {
                 WOLFSSL_MSG("DtlsMsgNew allocation failed");
-                ssl->error = MEMORY_E;
+                ret = MEMORY_E;
+                ssl->error = ret;
             }
             else {
-                if (DtlsMsgSet(cur, seq, epoch, data, type,
-                             fragOffset, fragSz, heap, dataSz, encrypted) < 0) {
+                ret = DtlsMsgSet(cur, seq, epoch, data, type,
+                             fragOffset, fragSz, heap, dataSz, encrypted);
+                if (ret < 0) {
                     DtlsMsgDelete(cur, heap);
                 }
                 else {
@@ -10928,7 +11044,7 @@ void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
         }
         else {
             /* If this fails, the data is just dropped. */
-            DtlsMsgSet(cur, seq, epoch, data, type, fragOffset,
+            ret = DtlsMsgSet(cur, seq, epoch, data, type, fragOffset,
                     fragSz, heap, dataSz, encrypted);
         }
     }
@@ -10936,10 +11052,11 @@ void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
         head = DtlsMsgNew(dataSz, 0, heap);
         if (head == NULL) {
             WOLFSSL_MSG("DtlsMsgNew allocation failed");
-            ssl->error = MEMORY_E;
+            ret = MEMORY_E;
+            ssl->error = ret;
         }
-        else if (DtlsMsgSet(head, seq, epoch, data, type, fragOffset,
-                    fragSz, heap, dataSz, encrypted) < 0) {
+        else if ((ret = DtlsMsgSet(head, seq, epoch, data, type, fragOffset,
+                    fragSz, heap, dataSz, encrypted)) < 0) {
             DtlsMsgDelete(head, heap);
             head = NULL;
         }
@@ -10949,6 +11066,8 @@ void DtlsMsgStore(WOLFSSL* ssl, word16 epoch, word32 seq, const byte* data,
     }
 
     ssl->dtls_rx_msg_list = head;
+
+    return ret;
 }
 
 
@@ -13209,7 +13328,17 @@ static int GetDtlsRecordHeader(WOLFSSL* ssl, word32* inOutIdx,
     }
 
 #ifdef WOLFSSL_DTLS_CID
-    if (rh->type == dtls12_cid && (cidSz = DtlsGetCidRxSize(ssl)) == 0)
+    if (rh->type == dtls12_cid) {
+        if ((cidSz = DtlsGetCidRxSize(ssl)) == 0)
+            return DTLS_CID_ERROR;
+    }
+    /* RFC 9146 Sec 4: once a receive CID is negotiated every protected record
+     * must use the dtls12_cid type. The MAC covers the inner content type, not
+     * the wire type, so a record re-framed as application_data still
+     * authenticates. A CID configured but not accepted by the peer must not
+     * gate anything: the DTLS 1.2 client keeps its unnegotiated rx CID. */
+    else if (ssl->keys.curEpoch != 0 && DtlsCIDIsNegotiated(ssl) &&
+             DtlsGetCidRxSize(ssl) != 0)
         return DTLS_CID_ERROR;
 #endif
 
@@ -16776,9 +16905,17 @@ PRAGMA_GCC_DIAG_POP
     }
 
 #ifdef WOLFSSL_SMALL_CERT_VERIFY
-    /* get signature check failures from above */
-    if (ret == 0)
+    /* get signature check failures from above; an RFC 7250 raw public key has
+     * no cert signature, so exempt it - but only for the leaf (CERT_TYPE),
+     * which is the only entry the RPK trust check runs on. A bare key sent as
+     * any other list entry keeps failing here. */
+    if (ret == 0
+    #if defined(HAVE_RPK)
+          && !(args->dCert->isRPK && certType == CERT_TYPE)
+    #endif
+        ) {
         ret = sigRet;
+    }
 #endif
 
     if (pSubjectHash)
@@ -20224,6 +20361,17 @@ int DoHandShakeMsgType(WOLFSSL* ssl, byte* input, word32* inOutIdx,
             *inOutIdx = expectedIdx;
             return SendAlert(ssl, alert_warning, no_renegotiation);
         }
+#ifdef WOLFSSL_DTLS
+        /* RFC 6347 Sec 4.1: the epoch must not wrap. Both directions are
+         * checked because a second ClientHello can arrive between the peer's
+         * CCS and our own. */
+        if (ssl->options.dtls && (ssl->keys.dtls_epoch == 0xFFFF ||
+                ssl->keys.peerSeq[0].nextEpoch == 0xFFFF)) {
+            WOLFSSL_MSG("Refusing renegotiation. Epoch would wrap");
+            *inOutIdx = expectedIdx;
+            return SendAlert(ssl, alert_warning, no_renegotiation);
+        }
+#endif
         ret = ResetHandshakeStateForReneg(ssl);
         if (ret != 0)
             return ret;
@@ -23958,10 +24106,41 @@ static void LogAlert(int type)
 #endif /* DEBUG_WOLFSSL */
 }
 
+/* RFC 9846 Section 6.1 exempts "user_canceled" from tearing the connection
+ * down whatever AlertLevel the peer used, because the level byte carries no
+ * meaning in TLS 1.3.
+ *
+ * The exemption needs a connection that is demonstrably running TLS 1.3, and
+ * neither obvious flag is enough on its own. ssl->version holds the highest
+ * version this side offered until the peer's choice is known, and
+ * options.tls1_3 is set from the session by wolfSSL_set_session() before any
+ * ServerHello, so a downgrade-capable client resuming a TLS 1.3 session has
+ * both set while the peer may still pick TLS 1.2. Exempting on either would
+ * swallow a pre-1.3 peer's fatal alert and leave the caller waiting for a
+ * handshake that is never coming.
+ *
+ * Requiring the record to have been decrypted settles it: in TLS 1.3 every
+ * record after the ServerHello is encrypted, so a decrypted alert can only
+ * have arrived on a connection whose version is already agreed - which is the
+ * only situation RFC 9846 Section 6.1 is describing. keys.decryptedCur is a
+ * property of the record in hand, not a latch: GetRecordHeader() clears it for
+ * each new record and only a successful decrypt sets it, so an earlier
+ * encrypted record cannot lend its status to a later plaintext alert.
+ *
+ * ssl   The SSL/TLS object.
+ * code  Alert description received.
+ * returns 1 when the alert must be ignored rather than acted on.
+ */
+static int AlertIsExemptUserCanceled(const WOLFSSL* ssl, int code)
+{
+    return ssl->options.tls1_3 && ssl->keys.decryptedCur &&
+           (code == user_canceled);
+}
+
 /* process alert, return level */
 #ifndef NO_SESSION_CACHE
 /* RFC 5246 Section 7.2.2: a TLS 1.2 session whose connection is terminated by a
- * fatal alert MUST be invalidated so it cannot be resumed. (TLS 1.3 RFC 8446
+ * fatal alert MUST be invalidated so it cannot be resumed. (TLS 1.3 RFC 9846
  * Section 6.2 only requires closing the connection, but evicting here too is
  * sound defense-in-depth.) Evict the cached session (which also drops any
  * associated ticket). Acts on an established connection or an in-progress
@@ -23975,7 +24154,7 @@ static void InvalidateSessionOnFatalAlert(WOLFSSL* ssl)
         return;
     /* Don't evict on an unauthenticated record: a TLS 1.3 plaintext alert
      * received under encryption (current record not decrypted) is rejected (or
-     * ignored) by DoAlert, and the teardown alert routes back here. RFC 8446
+     * ignored) by DoAlert, and the teardown alert routes back here. RFC 9846
      * 6.2 doesn't require TLS 1.3 eviction; TLS 1.2 alerts are plaintext so are
      * unaffected. */
     if (IsAtLeastTLSv1_3(ssl->version) && IsEncryptionOn(ssl, 0) &&
@@ -24039,10 +24218,16 @@ static int DoAlert(WOLFSSL* ssl, byte* input, word32* inOutIdx, int* type)
     {
         ssl->alert_history.last_rx.code = code;
         ssl->alert_history.last_rx.level = level;
-        if (level == alert_fatal) {
+        /* RFC 9846 Section 6.1: "user_canceled" only "generally" has
+         * AlertLevel=warning, and a receiver SHOULD keep reading until
+         * "close_notify" arrives. The level byte is meaningless in TLS 1.3,
+         * so do not let a peer that sends the alert at fatal level tear the
+         * connection down. */
+        if (level == alert_fatal &&
+                !AlertIsExemptUserCanceled(ssl, code)) {
             ssl->options.isClosed = 1;  /* Don't send close_notify */
         }
-        /* RFC 8446 Section 6.2: In TLS 1.3, all error alerts are implicitly
+        /* RFC 9846 Section 6.2: In TLS 1.3, all error alerts are implicitly
          * fatal regardless of the AlertLevel byte. */
         if (IsAtLeastTLSv1_3(ssl->version) &&
                 code != close_notify && code != user_canceled) {
@@ -24094,12 +24279,17 @@ static int DoAlert(WOLFSSL* ssl, byte* input, word32* inOutIdx, int* type)
         }
 #ifndef NO_SESSION_CACHE
         /* Validated fatal alert: invalidate the session so it can't be resumed
-         * (RFC 5246 7.2.2; in TLS 1.3 all error alerts are fatal, RFC 8446
-         * 6.2). */
-        if (*type != close_notify &&
-                (level == alert_fatal ||
-                 (IsAtLeastTLSv1_3(ssl->version) && *type != user_canceled)))
+         * (RFC 5246 7.2.2; in TLS 1.3 all error alerts are fatal, RFC 9846
+         * 6.2). "close_notify" is not an error, and "user_canceled" is exempt
+         * in TLS 1.3 at any AlertLevel (RFC 9846 6.1). */
+        if (IsAtLeastTLSv1_3(ssl->version)) {
+            if (*type != close_notify &&
+                    !AlertIsExemptUserCanceled(ssl, *type))
+                InvalidateSessionOnFatalAlert(ssl);
+        }
+        else if (level == alert_fatal && *type != close_notify) {
             InvalidateSessionOnFatalAlert(ssl);
+        }
 #endif
     }
     return level;
@@ -24949,7 +25139,9 @@ static int DoProcessAlertRecord(WOLFSSL* ssl)
     WOLFSSL_MSG("got ALERT!");
     ret = DoAlert(ssl, ssl->buffers.inputBuffer.buffer,
                   &ssl->buffers.inputBuffer.idx, &type);
-    if (ret == alert_fatal)
+    /* RFC 9846 Section 6.1: keep reading past a TLS 1.3 "user_canceled" until
+     * "close_notify" arrives, whatever AlertLevel the peer used. */
+    if (ret == alert_fatal && !AlertIsExemptUserCanceled(ssl, type))
         return FATAL_ERROR;
     else if (ret < 0)
         return ret;
@@ -24965,7 +25157,7 @@ static int DoProcessAlertRecord(WOLFSSL* ssl)
     if (type == decrypt_error)
         return FATAL_ERROR;
 
-    /* RFC 8446 Section 6.2: In TLS 1.3, all error alerts MUST
+    /* RFC 9846 Section 6.2: In TLS 1.3, all error alerts MUST
      * be treated as fatal regardless of the AlertLevel byte.
      * Only close_notify (handled above) and user_canceled
      * are exempt. */
@@ -25422,8 +25614,12 @@ static int DoProcessReplyEx(WOLFSSL* ssl, int allowSocketErr)
                 #endif /* WOLFSSL_DTLS */
                 #ifdef WOLFSSL_EARLY_DATA
                     if (ssl->options.tls1_3) {
+                        /* RFC 8446 Section 4.2.10: only skip records when
+                         * early data was rejected. After accepting early data
+                         * a decrypt failure is a fatal bad_record_mac. */
                          if (ssl->options.side == WOLFSSL_SERVER_END &&
-                                 ssl->earlyData != no_early_data &&
+                                 (ssl->earlyData == early_data_ext ||
+                                  ssl->earlyData == expecting_early_data) &&
                                  ssl->options.clientState <
                                                      CLIENT_FINISHED_COMPLETE) {
                             ssl->earlyDataSz += ssl->curSize;
@@ -26506,7 +26702,7 @@ int BuildMessage(WOLFSSL* ssl, byte* output, int outSz, const byte* input,
      * increments, so refuse at hi == lo == 0xFFFFFFFF (2^64-1): that last legal
      * value is deliberately sacrificed to avoid wrapping to 0 and reusing
      * sequence number 0. The caller must renegotiate or close. DTLS sequence
-     * numbers are epoch-scoped and handled elsewhere. */
+     * numbers are epoch-scoped and checked just below. */
     if (!sizeOnly && !ssl->options.dtls &&
             ssl->keys.sequence_number_hi == 0xFFFFFFFFU &&
             ssl->keys.sequence_number_lo == 0xFFFFFFFFU) {
@@ -26514,6 +26710,17 @@ int BuildMessage(WOLFSSL* ssl, byte* output, int outSz, const byte* input,
         WOLFSSL_ERROR_VERBOSE(SEQUENCE_NUMBER_E);
         return SEQUENCE_NUMBER_E;
     }
+
+#ifdef WOLFSSL_DTLS
+    /* RFC 6347 Sec 4.1: don't wrap the sequence number. Only protected records
+     * reach here, so the epoch 0 counter SendHelloVerifyRequest() copies from
+     * the peer is unaffected. */
+    if (!sizeOnly && ssl->options.dtls && DtlsSEQAtMax(ssl, epochOrder)) {
+        WOLFSSL_MSG("DTLS write sequence number would wrap");
+        WOLFSSL_ERROR_VERBOSE(SEQUENCE_NUMBER_E);
+        return SEQUENCE_NUMBER_E;
+    }
+#endif
 
 #ifdef WOLFSSL_ASYNC_CRYPT
     ret = WC_NO_PENDING_E;
@@ -28594,7 +28801,7 @@ int IsSCR(WOLFSSL* ssl)
     !defined(WOLFSSL_TLS13_IGNORE_AEAD_LIMITS)
 /*
  * Enforce limits specified in
- * https://www.rfc-editor.org/rfc/rfc8446#section-5.5
+ * https://www.rfc-editor.org/rfc/rfc9846#section-5.5
  */
 static int CheckTLS13AEADSendLimit(WOLFSSL* ssl)
 {
@@ -28660,6 +28867,44 @@ static int CheckTLS13AEADSendLimit(WOLFSSL* ssl)
         seq = w64From32(ssl->keys.sequence_number_hi,
                 ssl->keys.sequence_number_lo);
     }
+
+#ifdef WOLFSSL_EARLY_DATA
+    /* RFC 9846 Section 5.5: a KeyUpdate cannot be performed for early data, so
+     * a sender MUST NOT exceed the limits while sending it. There is no way to
+     * rekey here - the handshake has not finished, so a KeyUpdate would be out
+     * of order - and the write has to fail instead.
+     *
+     * Stop one record early. If the server accepts the early data the client
+     * still owes it an EndOfEarlyData, and Section 2.3 has that message go out
+     * under the same 0-RTT traffic keys. Spending the last record on
+     * application data would leave that message to overrun the limit.
+     *
+     * seq is the number the next record will use, so it also counts the
+     * records already sent under this key. Refusing once seq + 1 reaches the
+     * limit stops application data at seq == limit - 2 and keeps the final
+     * slot, seq == limit - 1, free for the EndOfEarlyData. */
+    if (ssl->options.side == WOLFSSL_CLIENT_END &&
+            ssl->earlyData != no_early_data &&
+            ssl->earlyData != done_early_data) {
+        w64wrapper afterThis = seq;
+
+        w64Increment(&afterThis);
+        /* cppcheck-suppress uninitvar
+         * (false positive from cppcheck-2.13.0: every switch arm above either
+         * sets limit or returns) */
+        if (w64GTE(afterThis, limit)) {
+            WOLFSSL_MSG("AEAD limit reached while sending early data");
+            /* Deliberately not recorded here. The caller decides whether this
+             * is an error: a write whose last record took the final slot has
+             * completed and returns success, and recording it now would leave
+             * TOO_MUCH_EARLY_DATA in the OpenSSL-compatibility error queue for
+             * a call that reported no failure. SendData() records it on the
+             * path that does fail. */
+            return TOO_MUCH_EARLY_DATA;
+        }
+        return 0;
+    }
+#endif
 
     if (w64GTE(seq, limit)) { /* cppcheck-suppress uninitvar
                                * (false positive from cppcheck-2.13.0)
@@ -28926,6 +29171,27 @@ int SendData(WOLFSSL* ssl, const void* data, size_t sz)
 #if defined(WOLFSSL_TLS13) && !defined(WOLFSSL_TLS13_IGNORE_AEAD_LIMITS)
         if (IsAtLeastTLSv1_3(ssl->version)) {
             ret = CheckTLS13AEADSendLimit(ssl);
+        #ifdef WOLFSSL_EARLY_DATA
+            /* This check runs at the top of every iteration, including the
+             * one after the last record, so it also fires when the write is
+             * already complete and its final record happened to reach the
+             * limit. Nothing is left to send, so report the success: without
+             * this the caller would see WOLFSSL_FATAL_ERROR for a write that
+             * fully landed.
+             *
+             * A write stopped part way through is a failure, not a short
+             * return. Short returns here are gated on partialWrite, and
+             * wolfSSL_get_error(ssl, ret) reports nothing for a positive ret,
+             * so a short count would be indistinguishable from a complete one
+             * to a caller following the documented contract. */
+            if (ret == WC_NO_ERR_TRACE(TOO_MUCH_EARLY_DATA)) {
+                if (sent == (word32)sz) {
+                    break;
+                }
+                /* Failing for real, so now it is worth recording. */
+                WOLFSSL_ERROR_VERBOSE(ret);
+            }
+        #endif
             if (ret != 0) {
                 ssl->error = ret;
                 return WOLFSSL_FATAL_ERROR;
@@ -29035,7 +29301,12 @@ int SendData(WOLFSSL* ssl, const void* data, size_t sz)
         while (encrypt == NULL);
         encrypt->done = 0;
         encrypt->avail = 0;
-        GrowAnOutputBuffer(ssl, &encrypt->buffer, outputSz);
+        ret = GrowAnOutputBuffer(ssl, &encrypt->buffer, outputSz);
+        if (ret != 0) {
+            encrypt->avail = 1;
+            ssl->error = ret;
+            return WOLFSSL_FATAL_ERROR;
+        }
         out = encrypt->buffer.buffer;
 #endif
 
@@ -34742,6 +35013,15 @@ static void MakePSKPreMasterSecret(Arrays* arrays, byte use_psk_key)
         }
 #endif
 
+#ifdef WOLFSSL_DTLS_CID
+        /* RFC 9146 Sect. 3: the CID is only in use when the peer answered with
+         * its own connection_id. Drop the state otherwise, or the record layer
+         * keeps framing and authenticating receives as if a CID were there.
+         * The DTLS 1.3 client does this in DoTls13ServerHello(). */
+        if (ssl->options.dtls && ssl->options.useDtlsCID)
+            DtlsCIDOnExtensionsParsed(ssl);
+#endif /* WOLFSSL_DTLS_CID */
+
         ssl->options.serverState = SERVER_HELLO_COMPLETE;
 
 #ifdef HAVE_SECRET_CALLBACK
@@ -35462,6 +35742,7 @@ exit_gdpk:
     return ret;
 }
 #endif
+
 #if defined(HAVE_ECC) || defined(HAVE_CURVE25519) || defined(HAVE_CURVE448)
 static int GetEcDiffieHellmanKea(WOLFSSL *ssl,
                                  const byte *input, word32 size, DskeArgs *args)
@@ -35473,6 +35754,12 @@ static int GetEcDiffieHellmanKea(WOLFSSL *ssl,
 #endif
     int curveOid;
     word16 length;
+#ifdef HAVE_CURVE25519
+    const byte* peerPub;
+#ifndef WOLFSSL_X25519_NO_MASK_PEER
+    byte maskedPub[CURVE25519_KEYSIZE];
+#endif
+#endif
 
     if ((args->idx - args->begin) + ENUM_LEN + OPAQUE16_LEN +
         OPAQUE8_LEN > size) {
@@ -35515,7 +35802,12 @@ static int GetEcDiffieHellmanKea(WOLFSSL *ssl,
             }
         }
 
-        if ((ret = wc_curve25519_check_public(input + args->idx, length,
+        peerPub = input + args->idx;
+#ifndef WOLFSSL_X25519_NO_MASK_PEER
+        peerPub = MaskCurve25519PeerKey(peerPub, length, maskedPub);
+#endif
+
+        if ((ret = wc_curve25519_check_public(peerPub, length,
                                               EC25519_LITTLE_ENDIAN)) != 0) {
 #ifdef WOLFSSL_EXTRA_ALERTS
             if (ret == WC_NO_ERR_TRACE(BUFFER_E))
@@ -35531,7 +35823,7 @@ static int GetEcDiffieHellmanKea(WOLFSSL *ssl,
             return ECC_PEERKEY_ERROR;
         }
 
-        if (wc_curve25519_import_public_ex(input + args->idx,
+        if (wc_curve25519_import_public_ex(peerPub,
                                            length, ssl->peerX25519Key,
                                            EC25519_LITTLE_ENDIAN) != 0) {
             return ECC_PEERKEY_ERROR;
@@ -38148,6 +38440,27 @@ static int DoSessionTicket(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
 /* end client only parts */
 
 
+#if defined(HAVE_CURVE25519) && !defined(WOLFSSL_X25519_NO_MASK_PEER)
+/* RFC 7748 Section 5 requires X25519 receivers to clear the reserved high bit
+ * of the final u-coordinate byte rather than reject a peer key that sets it.
+ * Returns the pointer the caller should hand to the check and import calls: a
+ * masked copy in maskBuf for a full-length key, otherwise pub unchanged.
+ * Shared by the TLS 1.2 (client and server) and TLS 1.3 key exchange paths,
+ * so it must sit outside the client-only and !WOLFSSL_NO_TLS12 guards. */
+const byte* MaskCurve25519PeerKey(const byte* pub, word32 pubSz,
+                                  byte maskBuf[CURVE25519_KEYSIZE])
+{
+    if (pubSz != CURVE25519_KEYSIZE) {
+        return pub;
+    }
+
+    XMEMCPY(maskBuf, pub, CURVE25519_KEYSIZE);
+    maskBuf[CURVE25519_KEYSIZE - 1] &= 0x7f;
+    return maskBuf;
+}
+#endif /* HAVE_CURVE25519 && !WOLFSSL_X25519_NO_MASK_PEER */
+
+
 #ifndef NO_CERTS
 
 #if defined(WOLF_PRIVATE_KEY_ID) || defined(HAVE_PK_CALLBACKS)
@@ -38336,7 +38649,14 @@ static int DoSessionTicket(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
     int TranslateErrorToAlert(int err)
     {
         switch (err) {
+            /* RFC 9846 Section 4.3 requires a "decode_error" alert when an
+             * extension has data left over after its structure is parsed, and
+             * Section 6.2 defines the alert for any field out of range or
+             * message of incorrect length. The extension parsers report those
+             * as either BUFFER_ERROR or the wolfCrypt BUFFER_E; both must map
+             * here, or the handshake aborts silently with no alert sent. */
             case WC_NO_ERR_TRACE(BUFFER_ERROR):
+            case WC_NO_ERR_TRACE(BUFFER_E):
                 return decode_error;
             case WC_NO_ERR_TRACE(EXT_NOT_ALLOWED):
             case WC_NO_ERR_TRACE(PEER_KEY_ERROR):
@@ -39173,6 +39493,14 @@ static int AddPSKtoPreMasterSecret(WOLFSSL* ssl)
 #endif
                     {
                         /* Allocate DH key buffers and generate key */
+                        if (ssl->buffers.serverDH_P.buffer == NULL ||
+                            ssl->buffers.serverDH_G.buffer == NULL) {
+                            /* Buffers freed at the end of the last handshake,
+                             * create a new copy from the context. */
+                            if (CopySSL_CTX_DhParams(ssl, ssl->ctx) != 0) {
+                                ERROR_OUT(MEMORY_E, exit_sske);
+                            }
+                        }
                         if (ssl->buffers.serverDH_P.buffer == NULL ||
                             ssl->buffers.serverDH_G.buffer == NULL) {
                             ERROR_OUT(NO_DH_PARAMS, exit_sske);
@@ -44332,6 +44660,12 @@ static int DefTicketEncCb(WOLFSSL* ssl, byte key_name[WOLFSSL_TICKET_NAME_SZ],
     {
         int ret;
         int kea = ssl->specs.kea;
+    #ifdef HAVE_CURVE25519
+        const byte* peerPub;
+    #ifndef WOLFSSL_X25519_NO_MASK_PEER
+        byte maskedPub[CURVE25519_KEYSIZE];
+    #endif
+    #endif
 
         *haveCb = 0;
         if ((args->idx - args->begin) + OPAQUE8_LEN > size)
@@ -44376,7 +44710,12 @@ static int DefTicketEncCb(WOLFSSL* ssl, byte key_name[WOLFSSL_TICKET_NAME_SZ],
                 }
             }
 
-            if ((ret = wc_curve25519_check_public(input + args->idx,
+            peerPub = input + args->idx;
+        #ifndef WOLFSSL_X25519_NO_MASK_PEER
+            peerPub = MaskCurve25519PeerKey(peerPub, args->length, maskedPub);
+        #endif
+
+            if ((ret = wc_curve25519_check_public(peerPub,
                                    args->length, EC25519_LITTLE_ENDIAN)) != 0) {
             #ifdef WOLFSSL_EXTRA_ALERTS
                 if (ret == WC_NO_ERR_TRACE(BUFFER_E))
@@ -44392,7 +44731,7 @@ static int DefTicketEncCb(WOLFSSL* ssl, byte key_name[WOLFSSL_TICKET_NAME_SZ],
                 return ECC_PEERKEY_ERROR;
             }
 
-            if (wc_curve25519_import_public_ex(input + args->idx, args->length,
+            if (wc_curve25519_import_public_ex(peerPub, args->length,
                                ssl->peerX25519Key, EC25519_LITTLE_ENDIAN)) {
              #ifdef WOLFSSL_EXTRA_ALERTS
                 SendAlert(ssl, alert_fatal, illegal_parameter);

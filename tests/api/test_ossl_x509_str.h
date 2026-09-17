@@ -35,6 +35,7 @@ int test_wolfSSL_X509_verify_cert_pathlen_override(void);
 int test_wolfSSL_X509_verify_cert_pathlen_override_ctx_cb(void);
 int test_wolfSSL_X509_verify_cert_pathlen_anchor(void);
 int test_wolfSSL_X509_STORE_CTX_verify_cb(void);
+int test_wolfSSL_X509_STORE_CTX_verify_cb_check_id(void);
 int test_X509_verify_cert_untrusted_inter(void);
 int test_X509_verify_cert_ca_no_keycertsign(void);
 int test_X509_STORE_untrusted(void);
@@ -42,6 +43,7 @@ int test_X509_STORE_InvalidCa(void);
 int test_X509_STORE_InvalidCa_CtxCallback(void);
 int test_X509_STORE_InvalidCa_NoCallback(void);
 int test_wolfSSL_X509_STORE_CTX_trusted_stack_cleanup(void);
+int test_wolfSSL_X509_STORE_CTX_trusted_stack_reinit(void);
 int test_wolfSSL_X509_STORE_CTX_get_issuer(void);
 int test_wolfSSL_X509_STORE_set_flags(void);
 int test_wolfSSL_X509_STORE(void);
@@ -75,6 +77,8 @@ int test_wolfSSL_CTX_set_cert_store(void);
                                 test_wolfSSL_X509_verify_cert_pathlen_anchor), \
     TEST_DECL_GROUP("ossl_x509_store",                                         \
                                    test_wolfSSL_X509_STORE_CTX_verify_cb),     \
+    TEST_DECL_GROUP("ossl_x509_store",                                         \
+                           test_wolfSSL_X509_STORE_CTX_verify_cb_check_id),    \
     TEST_DECL_GROUP("ossl_x509_store", test_X509_verify_cert_untrusted_inter), \
     TEST_DECL_GROUP("ossl_x509_store",                                         \
                                   test_X509_verify_cert_ca_no_keycertsign),    \
@@ -84,6 +88,8 @@ int test_wolfSSL_CTX_set_cert_store(void);
     TEST_DECL_GROUP("ossl_x509_store", test_X509_STORE_InvalidCa_NoCallback),  \
     TEST_DECL_GROUP("ossl_x509_store",                                         \
                            test_wolfSSL_X509_STORE_CTX_trusted_stack_cleanup), \
+    TEST_DECL_GROUP("ossl_x509_store",                                         \
+                            test_wolfSSL_X509_STORE_CTX_trusted_stack_reinit), \
     TEST_DECL_GROUP("ossl_x509_store",                                         \
                                       test_wolfSSL_X509_STORE_CTX_get_issuer), \
     TEST_DECL_GROUP("ossl_x509_store", test_wolfSSL_X509_STORE_set_flags),     \
