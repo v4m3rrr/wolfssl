@@ -2118,6 +2118,9 @@ static int SaToNid(byte sa, int* nid)
         case sm2_sa_algo:
             *nid = WC_NID_sm2;
             break;
+        case mlkem_512_sa_algo:
+        case mlkem_768_sa_algo:
+        case mlkem_1024_sa_algo:
         case invalid_sa_algo:
         case any_sa_algo:
         default:

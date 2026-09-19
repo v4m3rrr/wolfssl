@@ -19,6 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
+#include "wolfssl/wolfcrypt/wc_mlkem.h"
 #include <wolfssl/wolfcrypt/libwolfssl_sources.h>
 
 /*
@@ -1045,6 +1046,106 @@ static int ProcessBufferTryDecodeMlDsa(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
 }
 #endif /* WOLFSSL_HAVE_MLDSA */
 
+#if defined(WOLFSSL_HAVE_MLKEM)
+/* See if DER data is an Kyber private key.
+ *
+ * @param [in, out] ctx        SSL context object.
+ * @param [in, out] ssl        SSL object.
+ * @param [in]      der        DER encoding.
+ * @param [in, out] keyFormat  On in, expected format. 0 means unknown.
+ * @param [in]      heap       Dynamic memory allocation hint.
+ * @param [in]      devId      Device identifier.
+ * @param [out]     keyType    Type of key.
+ * @param [out]     keySize    Size of key.
+ * @return  0 on success or not a Kyber key and format unknown.
+ */
+static int ProcessBufferTryDecodeMlKem(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
+    DerBuffer* der, int* keyFormat, void* heap, byte* keyType, int* keySize)
+{
+    int ret;
+    MlKemKey* key;
+    word32 idx;
+
+    (void)ctx;
+    (void)ssl;
+
+    /* Allocate an SLH-DSA key to parse into. */
+    key = (MlKemKey*)XMALLOC(sizeof(MlKemKey), heap, DYNAMIC_TYPE_MLKEM);
+    if (key == NULL) {
+        return MEMORY_E;
+    }
+
+    XMEMSET(key, 0, sizeof(MlKemKey));
+
+    if(wc_MlKemKey_Init(key, WC_ML_KEM_512, heap, INVALID_DEVID) != 0){
+        XFREE(key, heap, DYNAMIC_TYPE_MLKEM);
+        return MEMORY_E;
+    }
+
+    idx=0;
+    PRIVATE_KEY_UNLOCK();
+    ret = wc_MlKemKey_PrivateKeyDecode(key, der->buffer, der->length, &idx);
+    PRIVATE_KEY_LOCK();
+
+    if (ret==0){
+        *keyFormat=ML_KEM_512k;
+        *keyType = mlkem_512_sa_algo;
+        *keySize = WC_ML_KEM_512_PRIVATE_KEY_SIZE;
+        goto free;
+    }
+
+    wc_MlKemKey_Free(key);
+
+    if(wc_MlKemKey_Init(key, WC_ML_KEM_768, heap, INVALID_DEVID) != 0){
+        XFREE(key, heap, DYNAMIC_TYPE_MLKEM);
+        return MEMORY_E;
+    }
+
+    idx=0;
+    PRIVATE_KEY_UNLOCK();
+    ret = wc_MlKemKey_PrivateKeyDecode(key, der->buffer, der->length, &idx);
+    PRIVATE_KEY_LOCK();
+
+    if (ret==0){
+        *keyFormat=ML_KEM_768k;
+        *keyType = mlkem_768_sa_algo;
+        *keySize = WC_ML_KEM_768_PRIVATE_KEY_SIZE;
+        goto free;
+    }
+
+    wc_MlKemKey_Free(key);
+
+    if(wc_MlKemKey_Init(key, WC_ML_KEM_1024, heap, INVALID_DEVID) != 0){
+        XFREE(key, heap, DYNAMIC_TYPE_MLKEM);
+        return MEMORY_E;
+    }
+
+    idx=0;
+    PRIVATE_KEY_UNLOCK();
+    ret = wc_MlKemKey_PrivateKeyDecode(key, der->buffer, der->length, &idx);
+    PRIVATE_KEY_LOCK();
+
+    if (ret==0){
+        *keyFormat=ML_KEM_1024k;
+        *keyType = mlkem_1024_sa_algo;
+        *keySize = WC_ML_KEM_1024_PRIVATE_KEY_SIZE;
+        goto free;
+    }
+
+    wc_MlKemKey_Free(key);
+
+    if (*keyFormat == 0 && ret != 0) {
+        WOLFSSL_MSG("Not an ML-KEM key");
+        ret = 0;
+    }
+
+free:
+    /* Dispose of allocated key. */
+    XFREE(key, heap, DYNAMIC_TYPE_MLKEM);
+    return ret;
+}
+#endif /* WOLFSSL_HAVE_MLKEM */
+
 #if defined(WOLFSSL_HAVE_SLHDSA) && !defined(WOLFSSL_SLHDSA_VERIFY_ONLY)
 /* Try to decode the DER encoding as an SLH-DSA private key.
  *
@@ -1282,6 +1383,14 @@ static int ProcessBufferTryDecode(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
         matchAnyKey = 1;
     }
 #endif /* WOLFSSL_HAVE_MLDSA */
+#if defined(WOLFSSL_HAVE_MLKEM)
+    if ((ret == 0) && ((*keyFormat == 0) || (*keyFormat == ML_KEM_512k) ||
+            (*keyFormat == ML_KEM_768k) || (*keyFormat == ML_KEM_1024k))) {
+        ret = ProcessBufferTryDecodeMlKem(ctx, ssl, der, keyFormat, heap,
+            keyType, keySz);
+        matchAnyKey = 1;
+    }
+#endif /* WOLFSSL_HAVE_MLKEM */
 #if defined(WOLFSSL_HAVE_SLHDSA) && !defined(WOLFSSL_SLHDSA_VERIFY_ONLY)
     /* Try SLH-DSA if key format is an SLH-DSA key OID or yet unknown. */
     if ((ret == 0) &&

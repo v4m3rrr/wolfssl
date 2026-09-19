@@ -1806,6 +1806,7 @@ enum Misc {
 
     FALCON_SA_MAJOR     = 0xFE,/* Most significant byte used with falcon sig algs */
     MLDSA_SA_MAJOR      = 0x09,/* Most significant byte used with ML-DSA sig algs */
+    MLKEM_SA_MAJOR      = 0xFE,
 
     /* These values for falcon match what OQS has defined. */
     FALCON_LEVEL1_SA_MAJOR = 0xFE,
@@ -1820,6 +1821,10 @@ enum Misc {
     MLDSA_65_SA_MINOR = 0x05,
     MLDSA_87_SA_MAJOR = 0x09,
     MLDSA_87_SA_MINOR = 0x06,
+
+    MLKEM_512_SA_MINOR = 0xC4,
+    MLKEM_768_SA_MINOR = 0xC5,
+    MLKEM_1024_SA_MINOR = 0xC6,
 
     /* These values for SLH-DSA correspond to the code points assigned in
      * draft-reddy-tls-slhdsa (0x0911-0x091C) and match what oqs-provider uses.
@@ -4729,9 +4734,10 @@ enum KeyExchangeAlgorithm {
 #define SIG_MLDSA       0x10
 #define SIG_ANON        0x20
 #define SIG_SLHDSA      0x40
+#define SIG_MLKEM       0x80
 /* SIG_ANON is omitted by default */
 #define SIG_ALL         (SIG_ECDSA | SIG_RSA | SIG_SM2 | SIG_FALCON | \
-                         SIG_MLDSA | SIG_SLHDSA)
+                         SIG_MLDSA | SIG_SLHDSA | SIG_MLKEM)
 
 /* Supported Authentication Schemes */
 enum SignatureAlgorithm {
@@ -4763,6 +4769,9 @@ enum SignatureAlgorithm {
     slhdsa_shake_192f_sa_algo    = 29,
     slhdsa_shake_256s_sa_algo    = 30,
     slhdsa_shake_256f_sa_algo    = 31,
+    mlkem_512_sa_algo            = 32,
+    mlkem_768_sa_algo            = 33,
+    mlkem_1024_sa_algo           = 34,
     invalid_sa_algo              = 255
 };
 

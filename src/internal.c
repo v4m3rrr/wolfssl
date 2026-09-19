@@ -3550,6 +3550,23 @@ static WC_INLINE void AddSuiteHashSigAlgo(byte* hashSigAlgo, byte macAlgo,
         }
         else
     #endif /* WOLFSSL_HAVE_MLDSA */
+    #ifdef WOLFSSL_HAVE_MLKEM
+        if (sigAlgo == mlkem_512_sa_algo) {
+            ADD_HASH_SIG_ALGO(hashSigAlgo, inOutIdx,
+                MLKEM_SA_MAJOR, MLKEM_512_SA_MINOR);
+        }
+        else
+        if (sigAlgo == mlkem_768_sa_algo) {
+            ADD_HASH_SIG_ALGO(hashSigAlgo, inOutIdx,
+                MLKEM_SA_MAJOR, MLKEM_768_SA_MINOR);
+        }
+        else
+        if (sigAlgo == mlkem_1024_sa_algo) {
+            ADD_HASH_SIG_ALGO(hashSigAlgo, inOutIdx,
+                MLKEM_SA_MAJOR, MLKEM_1024_SA_MINOR);
+        }
+        else
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #ifdef WOLFSSL_HAVE_SLHDSA
       #if defined(WOLFSSL_SLHDSA_SHA2) && defined(WOLFSSL_SLHDSA_PARAM_SHA2_128S)
         if (sigAlgo == slhdsa_sha2_128s_sa_algo) {
@@ -3763,6 +3780,12 @@ void InitSuitesHashSigAlgo(byte* hashSigAlgo, int haveSig, int tls1_2,
             keySz, &idx);
     }
 #endif /* WOLFSSL_HAVE_MLDSA */
+#ifdef WOLFSSL_HAVE_MLKEM
+    if ((haveSig & SIG_SLHDSA) && tls1_3) {
+        AddSuiteHashSigAlgo(hashSigAlgo, no_mac, mlkem_512_sa_algo,
+            keySz, &idx);
+    }
+#endif /* WOLFSSL_HAVE_MLKEM */
 #ifdef WOLFSSL_HAVE_SLHDSA
     /* Only advertise the parameter sets that are actually compiled in, so we
      * never offer a scheme we cannot sign or verify. SLH-DSA is defined for
@@ -5258,6 +5281,20 @@ void DecodeSigAlg(const byte* input, byte* hashAlgo, byte* hsType)
                 *hsType = falcon_level5_sa_algo;
                 *hashAlgo = sha512_mac;
             }
+    #if defined(WOLFSSL_HAVE_MLKEM)
+            else if (input[1] ==MLKEM_512_SA_MINOR){
+                *hsType = mlkem_512_sa_algo;
+                *hashAlgo = no_mac;
+            }
+            else if (input[1] ==MLKEM_768_SA_MINOR){
+                *hsType = mlkem_768_sa_algo;
+                *hashAlgo = no_mac;
+            }
+            else if (input[1] ==MLKEM_1024_SA_MINOR){
+                *hsType = mlkem_1024_sa_algo;
+                *hashAlgo = no_mac;
+            }
+    #endif
             break;
     #endif /* HAVE_FALCON */
     #if defined(WOLFSSL_HAVE_MLDSA) || defined(WOLFSSL_HAVE_SLHDSA)

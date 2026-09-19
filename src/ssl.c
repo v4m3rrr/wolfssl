@@ -4431,6 +4431,15 @@ int wolfSSL_set_compression(WOLFSSL* ssl)
         case mldsa_87_sa_algo:
             *sigAlgo = ML_DSA_87k;
             break;
+        case mlkem_512_sa_algo:
+            *sigAlgo = ML_KEM_512k;
+            break;
+        case mlkem_768_sa_algo:
+            *sigAlgo = ML_KEM_768k;
+            break;
+        case mlkem_1024_sa_algo:
+            *sigAlgo = ML_KEM_1024k;
+            break;
         case slhdsa_sha2_128s_sa_algo:
             *sigAlgo = SLH_DSA_SHA2_128Sk;
             break;
