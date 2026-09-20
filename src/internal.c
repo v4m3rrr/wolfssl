@@ -3784,6 +3784,10 @@ void InitSuitesHashSigAlgo(byte* hashSigAlgo, int haveSig, int tls1_2,
     if ((haveSig & SIG_SLHDSA) && tls1_3) {
         AddSuiteHashSigAlgo(hashSigAlgo, no_mac, mlkem_512_sa_algo,
             keySz, &idx);
+        AddSuiteHashSigAlgo(hashSigAlgo, no_mac, mlkem_768_sa_algo,
+            keySz, &idx);
+        AddSuiteHashSigAlgo(hashSigAlgo, no_mac, mlkem_1024_sa_algo,
+            keySz, &idx);
     }
 #endif /* WOLFSSL_HAVE_MLKEM */
 #ifdef WOLFSSL_HAVE_SLHDSA
