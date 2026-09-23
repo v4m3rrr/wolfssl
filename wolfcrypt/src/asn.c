@@ -4984,6 +4984,38 @@ static int ParseCRL_Extensions(DecodedCRL* dcrl, const byte* buf, word32* inOutI
     /* ML-KEM-1024: 2.16.840.1.101.3.4.4.3 */
     static const byte keyMlKem_1024Oid[] =
         {96, 134, 72, 1, 101, 3, 4, 4, 3};
+
+typedef struct {
+    int type;       /* ML-KEM define types */
+    int oidKeySum;   /* ML_KEM_*k from oid_sum.h. */
+} MlKemOidMap;
+
+#define MLKEM_OID_ROW(p, k) { (p), (k) }
+
+static const MlKemOidMap mlKemOidMap[] = {
+    MLKEM_OID_ROW(WC_ML_KEM_512, ML_KEM_512k),
+    MLKEM_OID_ROW(WC_ML_KEM_768, ML_KEM_768k),
+    MLKEM_OID_ROW(WC_ML_KEM_1024, ML_KEM_1024k),
+};
+
+#define MLKEM_OID_MAP_LEN \
+    ((int)(sizeof(mlKemOidMap) / sizeof(mlKemOidMap[0])))
+
+/* Map ML-KEM OID key type (ML_KEM_*k).
+ *
+ * A known OID whose parameter set is disabled returns NOT_COMPILED_IN so
+ * callers can render a "variant unavailable" diagnostic; an unknown OID
+ * returns -1. */
+int wc_MlKemOidToParam(int oid)
+{
+    int i;
+    for (i = 0; i < MLKEM_OID_MAP_LEN; i++) {
+        if (mlKemOidMap[i].oidKeySum == oid) {
+            return mlKemOidMap[i].type;
+        }
+    }
+    return -1;
+}
 #endif /* WOLFSSL_HAVE_MLKEM && !WOLFSSL_MLKEM_NO_ASN1 */
 #ifdef WOLFSSL_HAVE_FRODOKEM
     /* FrodoKEM / eFrodoKEM key OIDs (ISO/IEC 18033-2, arc 1.0.18033.2.2.7.x).

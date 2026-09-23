@@ -129,6 +129,9 @@
 #ifdef HAVE_FALCON
     #include <wolfssl/wolfcrypt/falcon.h>
 #endif
+#ifdef WOLFSSL_HAVE_MLKEM
+    #include <wolfssl/wolfcrypt/wc_mlkem.h>
+#endif
 #ifdef WOLFSSL_HAVE_MLDSA
     #include <wolfssl/wolfcrypt/wc_mldsa.h>
 #endif
@@ -1979,6 +1982,11 @@ WOLFSSL_LOCAL int NamedGroupIsPqcHybrid(int group);
     #define MIN_FALCONKEY_SZ    1281
 #endif
 #endif
+#ifdef WOLFSSL_HAVE_MLKEM
+#ifndef MIN_MLKEMKEY_SZ
+    #define MIN_MLKEMKEY_SZ    1632
+#endif
+#endif
 #ifdef WOLFSSL_HAVE_MLDSA
 #ifndef MIN_MLDSAKEY_SZ
     #define MIN_MLDSAKEY_SZ    2528
@@ -2168,6 +2176,7 @@ enum states {
     SERVER_HELLO_COMPLETE,
     SERVER_ENCRYPTED_EXTENSIONS_COMPLETE,
     SERVER_CERT_COMPLETE,
+
     SERVER_CERT_VERIFY_COMPLETE,
     SERVER_KEYEXCHANGE_COMPLETE,
     SERVER_HELLODONE_COMPLETE,
@@ -2177,6 +2186,7 @@ enum states {
     CLIENT_HELLO_RETRY,
     CLIENT_HELLO_COMPLETE,
     CLIENT_KEYEXCHANGE_COMPLETE,
+    CLIENT_KEM_CIPHERTEXT_COMPLETE,
     CLIENT_CHANGECIPHERSPEC_COMPLETE,
     CLIENT_FINISHED_COMPLETE,
 
@@ -2829,6 +2839,9 @@ struct WOLFSSL_CERT_MANAGER {
     wolfSSL_Ref     ref;
 #ifdef HAVE_FALCON
     short           minFalconKeySz;     /* minimum allowed Falcon key size */
+#endif
+#if defined(WOLFSSL_HAVE_MLKEM)
+    short           minMlKemKeySz;    /* minimum ML-KEM key size */
 #endif
 #ifdef WOLFSSL_HAVE_MLDSA
     short           minMlDsaKeySz;      /* minimum allowed ML-DSA key size */
@@ -4340,6 +4353,9 @@ struct WOLFSSL_CTX {
 #ifdef HAVE_FALCON
     short       minFalconKeySz;   /* minimum Falcon key size */
 #endif
+#if defined(WOLFSSL_HAVE_MLKEM)
+    short           minMlKemKeySz;    /* minimum ML-KEM key size */
+#endif
 #ifdef WOLFSSL_HAVE_MLDSA
     short       minMlDsaKeySz;    /* minimum ML-DSA key size */
 #endif
@@ -5187,6 +5203,9 @@ enum ConnectState {
     CLIENT_HELLO_SENT,
     HELLO_AGAIN,               /* HELLO_AGAIN s for DTLS case */
     HELLO_AGAIN_REPLY,
+#ifdef WOLFSSL_AUTHKEM
+    KEM_CIPHERTEXT,
+#endif
     FIRST_REPLY_DONE,
     FIRST_REPLY_FIRST,
     FIRST_REPLY_SECOND,
@@ -5691,6 +5710,9 @@ struct Options {
 #endif
 #if defined(HAVE_FALCON)
     short           minFalconKeySz;   /* minimum Falcon key size */
+#endif
+#if defined(WOLFSSL_HAVE_MLKEM)
+    short           minMlKemKeySz;    /* minimum ML-KEM key size */
 #endif
 #if defined(WOLFSSL_HAVE_MLDSA)
     short           minMlDsaKeySz;    /* minimum ML-DSA key size */
@@ -6666,6 +6688,10 @@ struct WOLFSSL {
     falcon_key*     peerFalconKey;
     byte            peerFalconKeyPresent;
 #endif
+#ifdef WOLFSSL_HAVE_MLKEM
+    MlKemKey*       peerMlKemKey;
+    byte            peerMlKemKeyPresent;
+#endif
 #ifdef WOLFSSL_HAVE_MLDSA
     wc_MlDsaKey*    peerMlDsaKey;
     byte            peerMlDsaKeyPresent;
@@ -7194,6 +7220,7 @@ enum HandShakeType {
     finished             =  20,
     certificate_status   =  22,
     key_update           =  24,
+    kem_encapsulation    =  30,
     change_cipher_hs     =  55,    /* simulate unique handshake type for sanity
                                       checks.  record layer change_cipher
                                       conflicts with handshake finished */
@@ -7479,6 +7506,9 @@ WOLFSSL_LOCAL word32 MacSize(const WOLFSSL* ssl);
     WOLFSSL_LOCAL int DoHelloVerifyRequest(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
         word32 size);
     #ifdef WOLFSSL_TLS13
+#ifdef WOLFSSL_AUTHKEM
+    WOLFSSL_LOCAL int SendKemTlsClientKemCiphertext(WOLFSSL* ssl);
+#endif
     WOLFSSL_LOCAL int SendTls13ClientHello(WOLFSSL* ssl);
     #endif
     WOLFSSL_LOCAL int SendClientKeyExchange(WOLFSSL* ssl);

@@ -204,6 +204,8 @@
 #endif
 #endif /* WC_ML_KEM_MAX_K */
 
+#define WC_ML_KEM_DEFAULT_TYPE WC_ML_KEM_512
+
 #define KYBER_N             MLKEM_N
 
 /* Size of a polynomial vector based on dimensions. */

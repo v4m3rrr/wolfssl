@@ -1091,7 +1091,7 @@ static int ProcessBufferTryDecodeMlKem(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
         *keyFormat=ML_KEM_512k;
         *keyType = mlkem_512_sa_algo;
         *keySize = WC_ML_KEM_512_PRIVATE_KEY_SIZE;
-        goto free;
+        goto success;
     }
 
     wc_MlKemKey_Free(key);
@@ -1110,7 +1110,7 @@ static int ProcessBufferTryDecodeMlKem(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
         *keyFormat=ML_KEM_768k;
         *keyType = mlkem_768_sa_algo;
         *keySize = WC_ML_KEM_768_PRIVATE_KEY_SIZE;
-        goto free;
+        goto success;
     }
 
     wc_MlKemKey_Free(key);
@@ -1129,7 +1129,7 @@ static int ProcessBufferTryDecodeMlKem(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
         *keyFormat=ML_KEM_1024k;
         *keyType = mlkem_1024_sa_algo;
         *keySize = WC_ML_KEM_1024_PRIVATE_KEY_SIZE;
-        goto free;
+        goto success;
     }
 
     wc_MlKemKey_Free(key);
@@ -1137,8 +1137,16 @@ static int ProcessBufferTryDecodeMlKem(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
     if (*keyFormat == 0 && ret != 0) {
         WOLFSSL_MSG("Not an ML-KEM key");
         ret = 0;
+        goto free;
     }
-
+success:
+    int minKeySz = ssl ? ssl->options.minMlKemKeySz :
+                         ctx->minMlKemKeySz;
+    /* Check that the size of the ML-KEM key is enough. */
+    if (*keySize < minKeySz) {
+        WOLFSSL_MSG("ML-KEM private key too small");
+        ret = MLKEM_KEY_SIZE_E;
+    }
 free:
     /* Dispose of allocated key. */
     XFREE(key, heap, DYNAMIC_TYPE_MLKEM);
@@ -2032,6 +2040,35 @@ static int ProcessBufferCertPublicKey(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
             }
             break;
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case ML_KEM_512k:
+            keyType = mlkem_512_sa_algo;
+            keySz = WC_ML_KEM_512_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+        case ML_KEM_768k:
+            keyType = mlkem_768_sa_algo;
+            keySz = WC_ML_KEM_768_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+        case ML_KEM_1024k:
+            keyType = mlkem_1024_sa_algo;
+            keySz = WC_ML_KEM_1024_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA)
         #ifdef WOLFSSL_MLDSA_FIPS204_DRAFT
         case DILITHIUM_LEVEL2k:
@@ -2284,6 +2321,35 @@ static int ProcessBufferCertAltPublicKey(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
             }
             break;
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case ML_KEM_512k:
+            keyType = mlkem_512_sa_algo;
+            keySz = WC_ML_KEM_512_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+        case ML_KEM_768k:
+            keyType = mlkem_768_sa_algo;
+            keySz = WC_ML_KEM_768_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+        case ML_KEM_1024k:
+            keyType = mlkem_1024_sa_algo;
+            keySz = WC_ML_KEM_1024_PUBLIC_KEY_SIZE;
+            if (checkKeySz) {
+                ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    MLKEM_KEY_SIZE_E);
+            }
+            break;
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA)
         #ifdef WOLFSSL_MLDSA_FIPS204_DRAFT
         case DILITHIUM_LEVEL2k:

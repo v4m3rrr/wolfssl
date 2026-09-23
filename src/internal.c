@@ -19,6 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
  */
 
+#include "wolfssl/wolfcrypt/wc_mlkem.h"
 #include <wolfssl/wolfcrypt/libwolfssl_sources.h>
 
 /*
@@ -2734,6 +2735,9 @@ int InitSSL_Ctx(WOLFSSL_CTX* ctx, WOLFSSL_METHOD* method, void* heap)
 #ifdef HAVE_FALCON
     ctx->minFalconKeySz = MIN_FALCONKEY_SZ;
 #endif /* HAVE_FALCON */
+#ifdef WOLFSSL_HAVE_MLKEM
+    ctx->minMlKemKeySz = MIN_MLKEMKEY_SZ;
+#endif /* WOLFSSL_HAVE_MLKEM */
 #ifdef WOLFSSL_HAVE_MLDSA
     ctx->minMlDsaKeySz = MIN_MLDSAKEY_SZ;
 #endif /* WOLFSSL_HAVE_MLDSA */
@@ -5288,15 +5292,15 @@ void DecodeSigAlg(const byte* input, byte* hashAlgo, byte* hsType)
     #if defined(WOLFSSL_HAVE_MLKEM)
             else if (input[1] ==MLKEM_512_SA_MINOR){
                 *hsType = mlkem_512_sa_algo;
-                *hashAlgo = no_mac;
+                *hashAlgo = sha512_mac;
             }
             else if (input[1] ==MLKEM_768_SA_MINOR){
                 *hsType = mlkem_768_sa_algo;
-                *hashAlgo = no_mac;
+                *hashAlgo = sha512_mac;
             }
             else if (input[1] ==MLKEM_1024_SA_MINOR){
                 *hsType = mlkem_1024_sa_algo;
-                *hashAlgo = no_mac;
+                *hashAlgo = sha512_mac;
             }
     #endif
             break;
@@ -7984,6 +7988,9 @@ int SetSSL_CTX(WOLFSSL* ssl, WOLFSSL_CTX* ctx, int writeDup)
 #ifdef HAVE_FALCON
     ssl->options.minFalconKeySz = ctx->minFalconKeySz;
 #endif /* HAVE_FALCON */
+#ifdef WOLFSSL_HAVE_MLKEM
+    ssl->options.minMlKemKeySz = ctx->minMlKemKeySz;
+#endif /* WOLFSSL_HAVE_MLKEM */
 #ifdef WOLFSSL_HAVE_MLDSA
     ssl->options.minMlDsaKeySz = ctx->minMlDsaKeySz;
 #endif /* WOLFSSL_HAVE_MLDSA */
@@ -9237,6 +9244,11 @@ int AllocKey(WOLFSSL* ssl, int type, void** pKey)
             sz = sizeof(falcon_key);
             break;
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case DYNAMIC_TYPE_MLKEM:
+            sz = sizeof(MlKemKey);
+            break;
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA)
         case DYNAMIC_TYPE_MLDSA:
             sz = sizeof(wc_MlDsaKey);
@@ -9374,6 +9386,18 @@ int AllocKey(WOLFSSL* ssl, int type, void** pKey)
                 key_inited = 1;
             break;
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case DYNAMIC_TYPE_MLKEM:
+            /* ML-KEM requires the parameter set at init; use an always-present
+             * placeholder here and re-init with the real one once known.
+             * wc_MlKemKey_Init can fail before it zeroes the object, so clear
+             * it first, or the caller's FreeKey would run over raw memory. */
+            ret = wc_MlKemKey_Init((MlKemKey*)*pKey, WC_ML_KEM_DEFAULT_TYPE,
+                    ssl->heap, ssl->devId);
+            if (ret == 0)
+                key_inited = 1;
+            break;
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA)
         case DYNAMIC_TYPE_MLDSA:
             ret = wc_MlDsaKey_Init((wc_MlDsaKey*)*pKey, ssl->heap, ssl->devId);
@@ -12895,6 +12919,7 @@ int MsgCheckEncryption(WOLFSSL* ssl, byte type, byte encrypted)
             case end_of_early_data:
             case encrypted_extensions:
             case certificate:
+            case kem_encapsulation:
             case server_key_exchange:
             case certificate_request:
             case server_hello_done:
@@ -12932,6 +12957,7 @@ int MsgCheckEncryption(WOLFSSL* ssl, byte type, byte encrypted)
             case hello_verify_request:
             case hello_retry_request:
             case certificate:
+            case kem_encapsulation:
             case server_key_exchange:
             case certificate_request:
             case server_hello_done:
@@ -13008,6 +13034,7 @@ static int MsgCheckBoundary(const WOLFSSL* ssl, byte type,
                 case session_ticket:
                 case encrypted_extensions:
                 case certificate:
+                case kem_encapsulation:
                 case server_key_exchange:
                 case certificate_request:
                 case certificate_verify:
@@ -13042,6 +13069,7 @@ static int MsgCheckBoundary(const WOLFSSL* ssl, byte type,
                 case session_ticket:
                 case end_of_early_data:
                 case certificate:
+                case kem_encapsulation:
                 case server_key_exchange:
                 case certificate_request:
                 case server_hello_done:
@@ -13082,6 +13110,7 @@ static int MsgCheckBoundary(const WOLFSSL* ssl, byte type,
             case hello_retry_request:
             case encrypted_extensions:
             case certificate:
+            case kem_encapsulation:
             case server_key_exchange:
             case certificate_request:
             case server_hello_done:
@@ -17064,6 +17093,32 @@ static int ProcessPeerCertCheckKey(WOLFSSL* ssl, ProcPeerCertArgs* args)
             }
             break;
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case ML_KEM_512k:
+            if (ssl->options.minMlKemKeySz < 0 ||
+                WC_ML_KEM_512_PRIVATE_KEY_SIZE < (word16)ssl->options.minMlKemKeySz) {
+                WOLFSSL_MSG("ML-KEM key size in cert chain error");
+                ret = MLKEM_KEY_SIZE_E;
+                WOLFSSL_ERROR_VERBOSE(ret);
+            }
+            break;
+        case ML_KEM_768k:
+            if (ssl->options.minMlKemKeySz < 0 ||
+                WC_ML_KEM_768_PRIVATE_KEY_SIZE < (word16)ssl->options.minMlKemKeySz) {
+                WOLFSSL_MSG("ML-KEM key size in cert chain error");
+                ret = MLKEM_KEY_SIZE_E;
+                WOLFSSL_ERROR_VERBOSE(ret);
+            }
+            break;
+        case ML_KEM_1024k:
+            if (ssl->options.minMlKemKeySz < 0 ||
+                WC_ML_KEM_1024_PRIVATE_KEY_SIZE < (word16)ssl->options.minMlKemKeySz) {
+                WOLFSSL_MSG("ML-KEM key size in cert chain error");
+                ret = MLKEM_KEY_SIZE_E;
+                WOLFSSL_ERROR_VERBOSE(ret);
+            }
+            break;
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA)
         #ifdef WOLFSSL_MLDSA_FIPS204_DRAFT
         case DILITHIUM_LEVEL2k:
@@ -17871,6 +17926,49 @@ static int ProcessPeerCertDecodeKey(WOLFSSL* ssl, ProcPeerCertArgs* args,
             break;
         }
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        case ML_KEM_512k:
+        case ML_KEM_768k:
+        case ML_KEM_1024k:
+        {
+            int keyRet = 0;
+            int type = wc_MlKemOidToParam(args->dCert->keyOID);
+            if (type < 0) {
+                ret = PEER_KEY_ERROR;
+                break;
+            }
+
+            if (ssl->peerMlKemKey == NULL) {
+                /* alloc/init on demand */
+                keyRet = AllocKey(ssl, DYNAMIC_TYPE_MLKEM,
+                                  (void**)&ssl->peerMlKemKey);
+            } else if (ssl->peerMlKemKeyPresent) {
+                keyRet = ReuseKey(ssl, DYNAMIC_TYPE_MLKEM,
+                                  ssl->peerMlKemKey);
+                ssl->peerMlKemKeyPresent = 0;
+            }
+
+            if (keyRet == 0) {
+                /* AllocKey/ReuseKey used a placeholder parameter
+                 * set; re-init with the certificate's. */
+                wc_MlKemKey_Free(ssl->peerMlKemKey);
+                keyRet = wc_MlKemKey_Init(ssl->peerMlKemKey,
+                            type, ssl->heap, ssl->devId);
+            }
+
+            if (keyRet != 0 ||
+                wc_MlKemKey_DecodePublicKey(ssl->peerMlKemKey,
+                                          args->dCert->publicKey,
+                                          args->dCert->pubKeySize)
+                != 0) {
+                ret = PEER_KEY_ERROR;
+            }
+            else {
+                ssl->peerMlKemKeyPresent = 1;
+            }
+            break;
+        }
+    #endif /* WOLFSSL_HAVE_MLKEM */
     #if defined(WOLFSSL_HAVE_MLDSA) && \
         !defined(WOLFSSL_MLDSA_NO_VERIFY)
         case ML_DSA_44k:
@@ -19087,8 +19185,15 @@ int ProcessPeerCerts(WOLFSSL* ssl, byte* input, word32* inOutIdx,
                              ssl->specs.sig_algo == rsa_sa_algo ||
                                 (ssl->specs.sig_algo == ecc_dsa_sa_algo &&
                                      !ssl->specs.static_ecdh))) &&
-                        (args->dCert->extKeyUsage & KEYUSE_DIGITAL_SIG) == 0) {
+                        ((args->dCert->extKeyUsage & KEYUSE_DIGITAL_SIG) 
+#if defined(WOLFSSL_AUTHKEM)
+                        || (args->dCert->extKeyUsage & KEYUSE_KEY_ENCIPHER)
+#endif
+                        )== 0) {
                         WOLFSSL_MSG("KeyUse Digital Sig not set");
+#if defined(WOLFSSL_AUTHKEM)
+                        WOLFSSL_MSG("KeyUse Encipher not set");
+#endif
                         ret = KEYUSE_SIGNATURE_E;
                         WOLFSSL_ERROR_VERBOSE(ret);
                     }
@@ -30503,6 +30608,9 @@ const char* wolfSSL_ERR_reason_error_string(unsigned long e)
     case FALCON_KEY_SIZE_E:
         return "Wrong key size for Falcon.";
 
+    case MLKEM_KEY_SIZE_E:
+        return "Wrong key size for ML-KEM.";
+
     case MLDSA_KEY_SIZE_E:
         return "Wrong key size for ML-DSA.";
 
@@ -32916,6 +33024,17 @@ int PickHashSigAlgo(WOLFSSL* ssl, const byte* hashSigAlgo, word32 hashSigAlgoSz,
             break;
         }
     #endif /* HAVE_FALCON */
+    #if defined(WOLFSSL_HAVE_MLKEM)
+        if (ssl->pkCurveOID == ML_KEM_512k ||
+            ssl->pkCurveOID == ML_KEM_768k ||
+            ssl->pkCurveOID == ML_KEM_1024k ) {
+            /* Matched ML-KEM - set chosen and finished. */
+            ssl->options.sigAlgo = sigAlgo;
+            ssl->options.hashAlgo = hashAlgo;
+            ret = 0;
+            break;
+        }
+    #endif
     #if defined(WOLFSSL_HAVE_MLDSA)
         if (ssl->pkCurveOID == CTC_ML_DSA_44 ||
             ssl->pkCurveOID == CTC_ML_DSA_65 ||

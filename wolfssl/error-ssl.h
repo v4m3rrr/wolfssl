@@ -253,7 +253,9 @@ enum wolfSSL_ErrorCodes {
     OCSP_NO_URL                  = -522,   /* Cert advertises no OCSP responder
                                             * and no override URL is set */
 
-    WOLFSSL_LAST_E               = -522
+    WOLFSSL_LAST_E               = -522,
+
+    MLKEM_KEY_SIZE_E             = -523
 
     /* codes -1000 to -1999 are reserved for wolfCrypt. */
 };

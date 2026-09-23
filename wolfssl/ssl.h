@@ -1532,7 +1532,10 @@ WOLFSSL_API int  wolfSSL_request_certificate(WOLFSSL* ssl);
 
 WOLFSSL_API int  wolfSSL_preferred_group(WOLFSSL* ssl);
 
+WOLFSSL_API int  wolfSSL_connect_kemTLS(WOLFSSL* ssl);
 WOLFSSL_API int  wolfSSL_connect_TLSv13(WOLFSSL* ssl);
+
+WOLFSSL_API int wolfSSL_accept_kemTLS(WOLFSSL* ssl);
 WOLFSSL_API int  wolfSSL_accept_TLSv13(WOLFSSL* ssl);
 
 #ifdef WOLFSSL_EARLY_DATA

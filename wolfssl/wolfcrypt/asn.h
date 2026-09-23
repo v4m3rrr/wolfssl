@@ -3405,6 +3405,10 @@ WOLFSSL_TEST_VIS int SetAsymKeyDer(const byte* privKey, word32 privKeyLen,
     int keyType);
 #endif
 
+#ifdef WOLFSSL_HAVE_MLKEM
+WOLFSSL_LOCAL int wc_MlKemOidToParam(int oid);
+#endif
+
 #ifdef WOLFSSL_HAVE_SLHDSA
 /* SLH-DSA OID mapping helpers shared with x509.c, ssl.c, wc_slhdsa.c, etc.
  * All four are backed by a single static map in asn.c so the per-variant
