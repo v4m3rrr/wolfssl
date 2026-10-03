@@ -255,7 +255,9 @@ enum wolfSSL_ErrorCodes {
 
     WOLFSSL_LAST_E               = -522,
 
-    MLKEM_KEY_SIZE_E             = -523
+    MLKEM_KEY_SIZE_E             = -523,
+
+    KEMTLS_MLKEM_NOT_PRESENT_E   = -524
 
     /* codes -1000 to -1999 are reserved for wolfCrypt. */
 };

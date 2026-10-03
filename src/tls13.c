@@ -4653,9 +4653,16 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     word32 encSz;
     word32 i;
     byte *output;
+    word32 ssSz;
+    word32 ctSz;
+    unsigned char *ss;
+    unsigned char *ct;
+
+    ss=NULL;
+    ct=NULL;
+
     ret = 0;
 
-    // In my current build it does it is dummy macro
     WOLFSSL_START(WC_FUNC_CLIENT_KEM_CIPHERTEXT_SEND);
     WOLFSSL_ENTER("SendKemTlsClientKemCiphertext");
 
@@ -4673,7 +4680,7 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     // if so then cert_req_ctx is zero 
     if(ssl->options.serverState != SERVER_CERT_COMPLETE){
         // TODO Delete this
-        ret = WC_FAILURE;
+        ret = WOLFSSL_FATAL_ERROR;
         WOLFSSL_MSG("Server was not in cert_complete state");
         WOLFSSL_ERROR(ret);
         return ret;
@@ -4684,15 +4691,13 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     // so we need to find where is our cert to get public key
     
     if(ssl->peerMlKemKey == NULL || !ssl->peerMlKemKeyPresent){
-        // TODO Improve retured errors to be more descriptive
-        ret = WC_FAILURE;
-        WOLFSSL_MSG("peerMlKemKey is not set");
+        ret = KEMTLS_MLKEM_NOT_PRESENT_E;
         WOLFSSL_ERROR(ret);
     }
 
     key= ssl->peerMlKemKey;
 
-    // certificate_request_context is for client empty
+    // For client certificate_request_context is empty
     // TODO switch based who is sendding message
     i = RECORD_HEADER_SZ + HANDSHAKE_HEADER_SZ;
 
@@ -4701,36 +4706,10 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     if ((ret = SetKeysSide(ssl, ENCRYPT_AND_DECRYPT_SIDE)) != 0)
         return ret;
 
-    // Calculate encapsulation and secret sizes
-    // Secret is always 32 bytes accroding to FIPS 203
-    // TODO create define for shared secret size
-    word32 ssSz = 32;
-    
-    // Ciphertext ( or encapsualtion) size is based on type of the key
-    // TODO create function that return size of ciphertext for a given
-    // ML-KEM key type
-    // TODO create defines for evcery type of ML-KEM keys size of the
-    // corresponding ciphertext
-    word32 ctSz;
-    switch(key->type){
-        case WC_ML_KEM_512:
-            ctSz=768;
-            break;
-        case WC_ML_KEM_768:
-            ctSz=1088;
-            break;
-        case WC_ML_KEM_1024:
-            ctSz=1568;
-            break;
-        default:
-            WOLFSSL_MSG("Failed to tell the type of ML-KEM key pair");
-            return WOLFSSL_FATAL_ERROR;
-    }
-    unsigned char * ss=NULL;
-    unsigned char * ct=NULL;
+    wc_MlKemKey_SharedSecretSize(key,&ssSz);
+    wc_MlKemKey_CipherTextSize(key,&ctSz);
 
-    // TODO consider creating dynamic type for shared secret
-    ss=XMALLOC(ssSz,ssl->heap,DYNAMIC_TYPE_ARRAYS);
+    ss=XMALLOC(ssSz,ssl->heap,DYNAMIC_TYPE_SECRET);
     ct=XMALLOC(ctSz,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     
     if((ret = wc_MlKemKey_Encapsulate(key,ct,ss,ssl->rng)) != 0){
@@ -4778,7 +4757,8 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     if(sendSz < 0)
         return sendSz;
 
-    ssl->options.clientState = CLIENT_KEM_CIPHERTEXT_COMPLETE;
+    if(ssl->options.side == WOLFSSL_CLIENT_END)
+        ssl->options.clientState = CLIENT_KEM_CIPHERTEXT_COMPLETE;
 
     ssl->buffers.outputBuffer.length += (word32)sendSz;
     ssl->options.buildingMsg = 0;
@@ -12154,17 +12134,17 @@ static int DoTls13Certificate(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 }
 #endif
 
-#if defined(WOLFSSL_AUTHKEM) && defined(WOLFSSL_HAVE_MLKEM)
+#if defined(WOLFSSL_AUTHKEM) && defined(WOLFSSL_HAVE_MLKEM) && defined(NOT_IMPLEMENTED)
 static int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
                                   word32 totalSz)
 {
     int ret = 0;
+    
 
     WOLFSSL_START(WC_FUNC_KEM_ENCAPSULATION_DO);
     WOLFSSL_ENTER("DoKemTlsEncapsualation");
 
-    ret = :wq
-
+    
 
     WOLFSSL_LEAVE("DoKemTlsEncapsualation", ret);
     WOLFSSL_END(WC_FUNC_KEM_ENCAPSULATION_DO);

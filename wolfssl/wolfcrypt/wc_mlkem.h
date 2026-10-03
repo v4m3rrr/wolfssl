@@ -475,6 +475,7 @@ WOLFSSL_API int wc_MlKemKey_DecodePrivateKey(MlKemKey* key,
 WOLFSSL_API int wc_MlKemKey_DecodePublicKey(MlKemKey* key,
     const unsigned char* in, word32 len);
 
+
 #ifndef WOLFSSL_MLKEM_NO_ASN1
 /* DER (SubjectPublicKeyInfo / PKCS#8) encoding overhead over the raw key. */
 #define MLKEM_ASN1_PUB_OVERHEAD  32
