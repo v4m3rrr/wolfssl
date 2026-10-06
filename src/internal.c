@@ -9135,6 +9135,11 @@ void FreeKey(WOLFSSL* ssl, int type, void** pKey)
                 wc_MlDsaKey_Free((wc_MlDsaKey*)*pKey);
                 break;
         #endif /* WOLFSSL_HAVE_MLDSA */
+        #if defined(WOLFSSL_HAVE_MLKEM)
+            case DYNAMIC_TYPE_MLKEM:
+                wc_MlKemKey_Free((MlKemKey*)*pKey);
+                break;
+        #endif /* WOLFSSL_HAVE_MLKem */
         #if defined(WOLFSSL_HAVE_SLHDSA)
             case DYNAMIC_TYPE_SLHDSA:
                 wc_SlhDsaKey_Free((SlhDsaKey*)*pKey);
@@ -30694,6 +30699,8 @@ const char* wolfSSL_ERR_reason_error_string(unsigned long e)
 
     case RPK_UNTRUSTED_E:
         return "RFC 7250 Raw Public Key not trusted";
+    case KEMTLS_MLKEM_NOT_PRESENT_E:
+        return "The mlkem key is not present in ssl object";
     }
 
     return "unknown error number";
@@ -34136,6 +34143,60 @@ static int DecodePrivateKey_ex(WOLFSSL *ssl, byte keyType, const DerBuffer* key,
         }
     }
 #endif /* WOLFSSL_HAVE_SLHDSA */
+
+#if defined(WOLFSSL_HAVE_MLKEM) && defined(WOLFSSL_AUTHKEM)
+    #if !defined(NO_RSA) || defined(HAVE_ECC)
+        FreeKey(ssl, (int)*hsType, hsKey);
+    #endif
+
+    if(keyType == mlkem_512_sa_algo ||
+            keyType == mlkem_768_sa_algo ||
+            keyType == mlkem_1024_sa_algo)
+    {
+        *hsType = DYNAMIC_TYPE_MLKEM;
+        ret = AllocKey(ssl, *hsType, hsKey);
+        if (ret != 0) {
+            goto exit_dpk;
+        }
+
+        /* AllocKey initialised the key with a placeholder parameter set;
+         * re-init with the parameter set matching the loaded key. */
+        wc_MlKemKey_Free((MlKemKey*)*hsKey);
+        if(keyType == mlkem_512_sa_algo)
+            ret = wc_MlKemKey_Init((MlKemKey*)*hsKey, WC_ML_KEM_512,
+                                    ssl->heap, ssl->devId);
+        else if(keyType == mlkem_768_sa_algo)
+            ret = wc_MlKemKey_Init((MlKemKey*)*hsKey, WC_ML_KEM_768,
+                                    ssl->heap, ssl->devId);
+        else if(keyType == mlkem_1024_sa_algo)
+            ret = wc_MlKemKey_Init((MlKemKey*)*hsKey, WC_ML_KEM_1024,
+                                    ssl->heap, ssl->devId);
+        else 
+            ret = ALGO_ID_E;
+        
+        if (ret != 0) {
+            goto exit_dpk;
+        }
+
+        WOLFSSL_MSG("Trying ML-KEM private key");
+
+        idx = 0;
+        PRIVATE_KEY_UNLOCK();
+        ret = wc_MlKemKey_PrivateKeyDecode((MlKemKey*)*hsKey,
+                key->buffer, key->length,&idx);
+        PRIVATE_KEY_LOCK();
+
+        if (ret == 0) {
+            WOLFSSL_MSG("Using ML-KEM private key");
+
+            // We dont do signature
+            *sigLen = (word32)0;
+
+            goto exit_dpk;
+        }
+    }
+
+#endif /* WOLFSSL_HAVE_MLKEM && WOLFSSL_AUTHKEM */
 
     (void)idx;
     (void)keySzDecoded;

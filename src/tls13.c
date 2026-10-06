@@ -122,6 +122,7 @@
 #include <wolfssl/wolfcrypt/kdf.h>
 #include <wolfssl/wolfcrypt/signature.h>
 #include <wolfssl/tls_probe.h>
+#include "wolfssl/wolfcrypt/wc_mlkem.h"
 #ifdef NO_INLINE
     #include <wolfssl/wolfcrypt/misc.h>
 #else
@@ -164,7 +165,6 @@
         #pragma message("error: The build option HAVE_TLS_EXTENSIONS is required for TLS 1.3")
     #endif
 #endif
-
 
 /* Set ret to error value and jump to label.
  *
@@ -1332,6 +1332,36 @@ int DeriveMasterSecret(WOLFSSL* ssl)
 
     return ret;
 }
+#if defined(WOLFSSL_AUTHKEM)
+int DeriveAuthHandshakeSecret(WOLFSSL* ssl)
+{
+    byte key[WC_MAX_DIGEST_SIZE];
+    int ret;
+    WOLFSSL_MSG("Derive Authenticated Handshake Secret");
+    if (ssl == NULL || ssl->arrays == NULL) 
+        return BAD_FUNC_ARG;
+
+    /* Derive-Secret(., "derived", "") per RFC 8446 Section 7.1.
+     * Empty hash (NULL, 0) is required by the TLS 1.3 key schedule. */
+    ret = DeriveKeyMsg(ssl, key, -1, ssl->arrays->preMasterSecret,
+                        derivedLabel, DERIVED_LABEL_SZ,
+                        NULL, 0, ssl->specs.mac_algorithm);
+    if (ret == 0) {
+        ssl->arrays->authHandshakeSZ = ssl->arrays->preMasterSz;
+        PRIVATE_KEY_UNLOCK();
+        ret = Tls13_HKDF_Extract(ssl, ssl->arrays->authHandshakeSecret,
+                                 key, ssl->specs.hash_size,
+                                 ssl->arrays->authHandshakeSecret, 
+                                 ssl->arrays->authHandshakeSZ,
+                                 mac2hash(ssl->specs.mac_algorithm));
+        PRIVATE_KEY_LOCK();
+    }
+
+    ForceZero(key,sizeof(key));
+    
+    return ret;
+}
+#endif /* WOLFSSL_AUTHKEM */
 
 #if defined(HAVE_SESSION_TICKET)
 /* Length of the resumption label. */
@@ -4693,6 +4723,7 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     if(ssl->peerMlKemKey == NULL || !ssl->peerMlKemKeyPresent){
         ret = KEMTLS_MLKEM_NOT_PRESENT_E;
         WOLFSSL_ERROR(ret);
+        return ret;
     }
 
     key= ssl->peerMlKemKey;
@@ -4743,7 +4774,7 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     output[i++] = (byte) 0x00;
 
     // Insert the encapsualtion message
-    output[i] = (word16) ctSz;
+    c16toa(ctSz,output+i);
     i+=OPAQUE16_LEN;
     if(ctSz !=0){
         XMEMCPY(output+i, ct, ctSz);
@@ -4765,12 +4796,15 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     if (!ssl->options.groupMessages)
         ret = SendBuffered(ssl);
 
+    WOLFSSL_MSG("CHUJJJJJJ");
+    WOLFSSL_BUFFER(ss,ssSz);
+
     WOLFSSL_LEAVE("SendKemTlsClientKemCiphertext", ret);
     WOLFSSL_END(WC_FUNC_CLIENT_KEM_CIPHERTEXT_SEND);
 
     // For now we free both vars later we will need to store ss
 err:
-    XFREE(ss,ssl->heap,DYNAMIC_TYPE_ARRAYS);
+    XFREE(ss,ssl->heap,DYNAMIC_TYPE_SECRET);
     XFREE(ct,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     return ret;
 }
@@ -12134,21 +12168,77 @@ static int DoTls13Certificate(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 }
 #endif
 
-#if defined(WOLFSSL_AUTHKEM) && defined(WOLFSSL_HAVE_MLKEM) && defined(NOT_IMPLEMENTED)
-static int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
+#if defined(WOLFSSL_AUTHKEM) && defined(WOLFSSL_HAVE_MLKEM)
+int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
                                   word32 totalSz)
 {
-    int ret = 0;
-    
+    int ret;
+    word32 ssSz;
+    word16 ctSz;
+    word8 ctxSz;
+    unsigned char *ct;
+    unsigned char *ss;
+    word32 sigLen;
+
+    (void) ssl;
+    (void) inOutIdx;
+    (void) input;
+    (void) totalSz;
+
+    ret = 0;
+    ct = NULL;
+    ss = NULL;
 
     WOLFSSL_START(WC_FUNC_KEM_ENCAPSULATION_DO);
     WOLFSSL_ENTER("DoKemTlsEncapsualation");
 
+    //WOLFSSL_BUFFER(input+*inOutIdx,totalSz);
+
+    if(ssl->options.side != WOLFSSL_SERVER_END)
+        return SIDE_ERROR;
+
+    // TODO Sanity check
+    // modify the sanity check function 
+    // do no include here message sanity checks
+
+    DecodePrivateKey(ssl,&sigLen);
+
+    wc_MlKemKey_SharedSecretSize(ssl->hsKey,&ssSz);
+
+    // Read ctx for now it must be empty (server auth only)
+    // TODO mutual auth
+    ctxSz = input[*inOutIdx];
+    (*inOutIdx)++;
     
+    if(ctxSz != 0){
+        ret = INVALID_PARAMETER;
+        WOLFSSL_ERROR(ret);
+        return ret;
+    }
+
+    // Read cipertext size (16 bit opaque)
+    ato16(input+*inOutIdx, &ctSz);
+    (*inOutIdx)+=OPAQUE16_LEN;
+
+    ct=XMALLOC(ctSz,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
+    XMEMCPY(ct,input+*inOutIdx,ctSz);
+    (*inOutIdx)+=ctSz;
+
+    ss=XMALLOC(ssSz,ssl->heap,DYNAMIC_TYPE_SECRET);
+
+    if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ss,ct,ctSz))!=0){
+        WOLFSSL_ERROR(ret);
+        goto err;
+    }
 
     WOLFSSL_LEAVE("DoKemTlsEncapsualation", ret);
     WOLFSSL_END(WC_FUNC_KEM_ENCAPSULATION_DO);
 
+err:
+    FreeKey(ssl, (int)ssl->hsType, &ssl->hsKey);
+
+    XFREE(ss,ssl->heap,DYNAMIC_TYPE_SECRET);
+    XFREE(ct,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     return ret;
 }
 #endif
@@ -14640,6 +14730,9 @@ static int SanityCheckTls13MsgReceived(WOLFSSL* ssl, byte type)
 
             break;
 
+        // TODO Add sanity checks
+        case kem_encapsulation:
+            break;
 #ifndef NO_WOLFSSL_CLIENT
         case certificate_request:
         #ifndef NO_WOLFSSL_SERVER
@@ -15270,7 +15363,7 @@ int DoTls13HandShakeMsgType(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 #endif
 #if defined(WOLFSSL_AUTHKEM) && defined(WOLFSSL_HAVE_MLKEM)
     case kem_encapsulation:
-        WOLFSSL_MSG("processing certificate");
+        WOLFSSL_MSG("We reached kem");
         // TODO probe decapsulation
         ret = DoKemTlsEncapsualation(ssl, input, inOutIdx, size);
         break;
@@ -15689,7 +15782,7 @@ int DoTls13HandShakeMsg(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 
 #ifndef NO_WOLFSSL_CLIENT
 
-int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
+WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
 {
     int advanceState;
     int ret = 0;

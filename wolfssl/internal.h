@@ -4105,6 +4105,9 @@ enum DeriveKeyType {
 
 WOLFSSL_LOCAL int DeriveEarlySecret(WOLFSSL* ssl);
 WOLFSSL_LOCAL int DeriveHandshakeSecret(WOLFSSL* ssl);
+#ifdef WOLFSSL_AUTHKEM
+WOLFSSL_LOCAL int DeriveAuthHandshakeSecret(WOLFSSL* ssl);
+#endif
 #ifdef WOLFSSL_API_PREFIX_MAP
     #define DeriveTls13Keys wolfSSL_DeriveTls13Keys
 #endif
@@ -5732,6 +5735,11 @@ struct Options {
 typedef struct Arrays {
     byte*           preMasterSecret;
     word32          preMasterSz;        /* differs for DH, actual size */
+
+#if defined(WOLFSSL_AUTHKEM)
+    byte*           authHandshakeSecret;
+    word32          authHandshakeSZ;
+#endif
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
     word32          psk_keySz;          /* actual size */
     char            client_identity[MAX_PSK_ID_LEN + NULL_TERM_LEN];
@@ -7508,6 +7516,8 @@ WOLFSSL_LOCAL word32 MacSize(const WOLFSSL* ssl);
     #ifdef WOLFSSL_TLS13
 #ifdef WOLFSSL_AUTHKEM
     WOLFSSL_LOCAL int SendKemTlsClientKemCiphertext(WOLFSSL* ssl);
+    WOLFSSL_LOCAL int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
+                                  word32 totalSz);
 #endif
     WOLFSSL_LOCAL int SendTls13ClientHello(WOLFSSL* ssl);
     #endif
