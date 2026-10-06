@@ -4099,6 +4099,9 @@ enum DeriveKeyType {
     no_key,
     early_data_key,
     handshake_key,
+#if defined(WOLFSSL_AUTHKEM)
+	auth_handshake_key,
+#endif
     traffic_key,
     update_traffic_key
 };

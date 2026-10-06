@@ -780,6 +780,80 @@ static int DeriveServerHandshakeSecret(WOLFSSL* ssl, byte* key)
     return ret;
 }
 
+/* The length of the client auth handshake label. */
+#define CLIENT_AUTH_HANDSHAKE_LABEL_SZ   13
+/* The client handshake label. */
+static const byte clientAuthHandshakeLabel[CLIENT_AUTH_HANDSHAKE_LABEL_SZ + 1] =
+    "c ahs traffic";
+
+/* Derive the client authenticated handshake key.
+ *
+ * ssl  The SSL/TLS object.
+ * key  The derived key.
+ * returns 0 on success, otherwise failure.
+ */
+static int DeriveClientAuthHandshakeSecret(WOLFSSL* ssl, byte* key)
+{
+    int ret;
+    WOLFSSL_MSG("Derive Client Auth Handshake Secret");
+    if (ssl == NULL || ssl->arrays == NULL) {
+        return BAD_FUNC_ARG;
+    }
+
+    ret = Tls13DeriveKey(ssl, key, -1, ssl->arrays->authHandshakeSecret,
+                    clientAuthHandshakeLabel, CLIENT_AUTH_HANDSHAKE_LABEL_SZ,
+                    ssl->specs.mac_algorithm, 1, WOLFSSL_CLIENT_END);
+#ifdef HAVE_SECRET_CALLBACK
+    if (ret == 0 && ssl->tls13SecretCb != NULL) {
+        ret = ssl->tls13SecretCb(ssl, CLIENT_AUTH_HANDSHAKE_TRAFFIC_SECRET, key,
+                                 ssl->specs.hash_size, ssl->tls13SecretCtx);
+        if (ret != 0) {
+            WOLFSSL_ERROR_VERBOSE(TLS13_SECRET_CB_E);
+            return TLS13_SECRET_CB_E;
+        }
+    }
+#endif /* HAVE_SECRET_CALLBACK */
+    return ret;
+}
+
+/* The length of the server handshake label. */
+#define SERVER_AUTH_HANDSHAKE_LABEL_SZ   13
+/* The server handshake label. */
+static const byte serverAuthHandshakeLabel[SERVER_AUTH_HANDSHAKE_LABEL_SZ + 1] =
+    "s ahs traffic";
+
+/* Derive the server auth handshake key.
+ *
+ * ssl  The SSL/TLS object.
+ * key  The derived key.
+ * returns 0 on success, otherwise failure.
+ */
+static int DeriveServerAuthHandshakeSecret(WOLFSSL* ssl, byte* key)
+{
+    int ret;
+    WOLFSSL_MSG("Derive Server Auth Handshake Secret");
+    if (ssl == NULL || ssl->arrays == NULL) {
+        return BAD_FUNC_ARG;
+    }
+
+    ret = Tls13DeriveKey(ssl, key, -1, ssl->arrays->authHandshakeSecret,
+                    serverAuthHandshakeLabel, SERVER_AUTH_HANDSHAKE_LABEL_SZ,
+                    ssl->specs.mac_algorithm, 1, WOLFSSL_SERVER_END);
+
+#ifdef HAVE_SECRET_CALLBACK
+    if (ret == 0 && ssl->tls13SecretCb != NULL) {
+        ret = ssl->tls13SecretCb(ssl, SERVER_AUTH_HANDSHAKE_TRAFFIC_SECRET, key,
+                                 ssl->specs.hash_size, ssl->tls13SecretCtx);
+        if (ret != 0) {
+            WOLFSSL_ERROR_VERBOSE(TLS13_SECRET_CB_E);
+            return TLS13_SECRET_CB_E;
+        }
+    }
+#endif /* HAVE_SECRET_CALLBACK */
+    return ret;
+}
+
+
 /* The length of the client application traffic label. */
 #define CLIENT_APP_LABEL_SZ         12
 /* The client application traffic label. */
@@ -1347,7 +1421,6 @@ int DeriveAuthHandshakeSecret(WOLFSSL* ssl)
                         derivedLabel, DERIVED_LABEL_SZ,
                         NULL, 0, ssl->specs.mac_algorithm);
     if (ret == 0) {
-        ssl->arrays->authHandshakeSZ = ssl->arrays->preMasterSz;
         PRIVATE_KEY_UNLOCK();
         ret = Tls13_HKDF_Extract(ssl, ssl->arrays->authHandshakeSecret,
                                  key, ssl->specs.hash_size,
@@ -1618,6 +1691,24 @@ int DeriveTls13Keys(WOLFSSL* ssl, int secret, int side, int store)
                     goto end;
             }
             break;
+
+#ifdef WOLFSSL_AUTHKEM
+		case auth_handshake_key:
+            if (provision & PROVISION_CLIENT) {
+                ret = DeriveClientAuthHandshakeSecret(ssl,
+                                                  ssl->clientSecret);
+                if (ret != 0)
+                    goto end;
+            }
+            if (provision & PROVISION_SERVER) {
+                ret = DeriveServerAuthHandshakeSecret(ssl,
+                                                  ssl->serverSecret);
+                if (ret != 0)
+                    goto end;
+            }
+            break;
+
+#endif 
 
         case traffic_key:
             if (provision & PROVISION_CLIENT) {
@@ -4685,10 +4776,8 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     byte *output;
     word32 ssSz;
     word32 ctSz;
-    unsigned char *ss;
     unsigned char *ct;
 
-    ss=NULL;
     ct=NULL;
 
     ret = 0;
@@ -4740,10 +4829,12 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     wc_MlKemKey_SharedSecretSize(key,&ssSz);
     wc_MlKemKey_CipherTextSize(key,&ctSz);
 
-    ss=XMALLOC(ssSz,ssl->heap,DYNAMIC_TYPE_SECRET);
+    ssl->arrays->authHandshakeSecret = XMALLOC(ssSz, ssl->heap, 
+											   DYNAMIC_TYPE_SECRET);
     ct=XMALLOC(ctSz,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     
-    if((ret = wc_MlKemKey_Encapsulate(key,ct,ss,ssl->rng)) != 0){
+    if((ret = wc_MlKemKey_Encapsulate(key,ct,ssl->arrays->authHandshakeSecret,
+									  ssl->rng)) != 0) {
         goto err;
     }
 
@@ -4752,7 +4843,7 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     // Encapsulation was successful now we can finsihs the message
     encSz += OPAQUE16_LEN + ctSz;
 
-    sendSz = i+encSz;
+    sendSz = i + encSz;
 
     // this line was in sendtls13certificaterequset
     /* Always encrypted and make room for padding. */
@@ -4794,17 +4885,12 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     ssl->buffers.outputBuffer.length += (word32)sendSz;
     ssl->options.buildingMsg = 0;
     if (!ssl->options.groupMessages)
-        ret = SendBuffered(ssl);
-
-    WOLFSSL_MSG("CHUJJJJJJ");
-    WOLFSSL_BUFFER(ss,ssSz);
+		ret = SendBuffered(ssl);
 
     WOLFSSL_LEAVE("SendKemTlsClientKemCiphertext", ret);
     WOLFSSL_END(WC_FUNC_CLIENT_KEM_CIPHERTEXT_SEND);
 
-    // For now we free both vars later we will need to store ss
 err:
-    XFREE(ss,ssl->heap,DYNAMIC_TYPE_SECRET);
     XFREE(ct,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     return ret;
 }
@@ -12177,7 +12263,6 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
     word16 ctSz;
     word8 ctxSz;
     unsigned char *ct;
-    unsigned char *ss;
     word32 sigLen;
 
     (void) ssl;
@@ -12187,7 +12272,6 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 
     ret = 0;
     ct = NULL;
-    ss = NULL;
 
     WOLFSSL_START(WC_FUNC_KEM_ENCAPSULATION_DO);
     WOLFSSL_ENTER("DoKemTlsEncapsualation");
@@ -12224,9 +12308,12 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
     XMEMCPY(ct,input+*inOutIdx,ctSz);
     (*inOutIdx)+=ctSz;
 
-    ss=XMALLOC(ssSz,ssl->heap,DYNAMIC_TYPE_SECRET);
+	ssl->arrays->authHandshakeSecret = 
+		XMALLOC(ssSz, ssl->heap, DYNAMIC_TYPE_SECRET);
 
-    if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ss,ct,ctSz))!=0){
+	ssl->arrays->authHandshakeSZ = ssSz;
+    if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ssl->arrays->authHandshakeSecret,
+									ct,ctSz)) != 0) {
         WOLFSSL_ERROR(ret);
         goto err;
     }
@@ -12237,7 +12324,6 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 err:
     FreeKey(ssl, (int)ssl->hsType, &ssl->hsKey);
 
-    XFREE(ss,ssl->heap,DYNAMIC_TYPE_SECRET);
     XFREE(ct,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     return ret;
 }
