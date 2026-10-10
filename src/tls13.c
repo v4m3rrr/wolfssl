@@ -1379,6 +1379,14 @@ int DeriveMasterSecret(WOLFSSL* ssl)
         ret = DeriveKeyMsg(ssl, key, -1, ssl->arrays->authHandshakeSecret,
                             derivedLabel, DERIVED_LABEL_SZ,
                             NULL, 0, ssl->specs.mac_algorithm);
+        if (ret == 0) {
+            PRIVATE_KEY_UNLOCK();
+            ret = Tls13_HKDF_Extract(ssl, ssl->arrays->masterSecret,
+                                     key, ssl->specs.hash_size,
+                                     ssl->arrays->shared_secret_client, SECRET_LEN,
+                                     mac2hash(ssl->specs.mac_algorithm));
+            PRIVATE_KEY_LOCK();
+        }
     }
     else
 #endif
@@ -1388,16 +1396,16 @@ int DeriveMasterSecret(WOLFSSL* ssl)
         ret = DeriveKeyMsg(ssl, key, -1, ssl->arrays->preMasterSecret,
                             derivedLabel, DERIVED_LABEL_SZ,
                             NULL, 0, ssl->specs.mac_algorithm);
+        if (ret == 0) {
+            PRIVATE_KEY_UNLOCK();
+            ret = Tls13_HKDF_Extract(ssl, ssl->arrays->masterSecret,
+                                     key, ssl->specs.hash_size,
+                                     ssl->arrays->masterSecret, 0,
+                                     mac2hash(ssl->specs.mac_algorithm));
+            PRIVATE_KEY_LOCK();
+        }
     }
 
-    if (ret == 0) {
-        PRIVATE_KEY_UNLOCK();
-        ret = Tls13_HKDF_Extract(ssl, ssl->arrays->masterSecret,
-                                 key, ssl->specs.hash_size,
-                                 ssl->arrays->masterSecret, 0,
-                                 mac2hash(ssl->specs.mac_algorithm));
-        PRIVATE_KEY_LOCK();
-    }
 
 #ifdef WOLFSSL_CHECK_MEM_ZERO
     wc_MemZero_Add("DeriveMasterSecret key", key, WC_MAX_DIGEST_SIZE);
@@ -4802,18 +4810,18 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     ssl->options.buildingMsg = 1;
     ssl->keys.encryptionOn = 1;
 
-    if (ssl->options.side != WOLFSSL_CLIENT_END)
-        return SIDE_ERROR;
+    //if (ssl->options.side != WOLFSSL_CLIENT_END)
+    //    return SIDE_ERROR;
 
-    // Now i must tell if it is response to server certificate
-    // if so then cert_req_ctx is zero 
-    if(ssl->options.serverState != SERVER_CERT_COMPLETE){
-        // TODO Delete this
-        ret = WOLFSSL_FATAL_ERROR;
-        WOLFSSL_MSG("Server was not in cert_complete state");
-        WOLFSSL_ERROR(ret);
-        return ret;
-    }
+    //// Now i must tell if it is response to server certificate
+    //// if so then cert_req_ctx is zero 
+    //if(ssl->options.serverState != SERVER_CERT_COMPLETE){
+    //    // TODO Delete this
+    //    ret = WOLFSSL_FATAL_ERROR;
+    //    WOLFSSL_MSG("Server was not in cert_complete state");
+    //    WOLFSSL_ERROR(ret);
+    //    return ret;
+    //}
 
     // Now we know that it is after server Cert msg so we can construct msg
     // we need now only encapsulation for now i will not even save it
@@ -4827,8 +4835,6 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
 
     key= ssl->peerMlKemKey;
 
-    // For client certificate_request_context is empty
-    // TODO switch based who is sendding message
     i = RECORD_HEADER_SZ + HANDSHAKE_HEADER_SZ;
 
     wc_MlKemKey_SharedSecretSize(key,&ssSz);
@@ -4841,9 +4847,17 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
 
     ct=XMALLOC(ctSz,ssl->heap,DYNAMIC_TYPE_TMP_BUFFER);
     
-    if((ret = wc_MlKemKey_Encapsulate(key,ct,ssl->arrays->authHandshakeSecret,
-									  ssl->rng)) != 0) {
-        goto err;
+    if(ssl->options.side == WOLFSSL_CLIENT_END){
+        if((ret = wc_MlKemKey_Encapsulate(key,ct,ssl->arrays->authHandshakeSecret,
+                                          ssl->rng)) != 0) {
+            goto err;
+        }
+    }
+    else{
+        if((ret = wc_MlKemKey_Encapsulate(key,ct,ssl->arrays->shared_secret_client,
+                                          ssl->rng)) != 0) {
+            goto err;
+        }
     }
 
     encSz = OPAQUE8_LEN;
@@ -4887,8 +4901,25 @@ int SendKemTlsClientKemCiphertext(WOLFSSL* ssl)
     if(sendSz < 0)
         return sendSz;
 
+    if(ssl->options.side == WOLFSSL_CLIENT_END){
+        if ((ret = DeriveAuthHandshakeSecret(ssl)) != 0)
+            return ret;
+
+        ForceZero(ssl->arrays->preMasterSecret, ssl->arrays->preMasterSz);
+
+        if ((ret = DeriveTls13Keys(ssl, auth_handshake_key,
+                                   ENCRYPT_AND_DECRYPT_SIDE, 1)) != 0)
+            return ret;
+
+        if ((ret = SetKeysSide(ssl, ENCRYPT_AND_DECRYPT_SIDE)) != 0)
+            return ret;
+    }
+
     if(ssl->options.side == WOLFSSL_CLIENT_END)
         ssl->options.clientState = CLIENT_KEM_CIPHERTEXT_COMPLETE;
+
+    if(ssl->options.side == WOLFSSL_SERVER_END)
+        ssl->options.serverState = SERVER_KEM_CIPHERTEXT_COMPLETE;
 
     ssl->buffers.outputBuffer.length += (word32)sendSz;
     ssl->options.buildingMsg = 0;
@@ -12244,6 +12275,10 @@ static int DoTls13Certificate(WOLFSSL* ssl, byte* input, word32* inOutIdx,
         if (ssl->options.side == WOLFSSL_CLIENT_END)
             ssl->options.serverState = SERVER_CERT_COMPLETE;
 #endif
+#if !defined(NO_WOLFSSL_SERVER)
+        if (ssl->options.side == WOLFSSL_SERVER_END)
+            ssl->options.clientState = CLIENT_CERT_COMPLETE;
+#endif
 #if !defined(NO_WOLFSSL_SERVER) && defined(WOLFSSL_POST_HANDSHAKE_AUTH)
         if (ssl->options.side == WOLFSSL_SERVER_END &&
                                 ssl->options.handShakeState == HANDSHAKE_DONE) {
@@ -12284,8 +12319,6 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
     WOLFSSL_START(WC_FUNC_KEM_ENCAPSULATION_DO);
     WOLFSSL_ENTER("DoKemTlsEncapsualation");
 
-    if(ssl->options.side != WOLFSSL_SERVER_END)
-        return SIDE_ERROR;
 
     // TODO Sanity check
     // modify the sanity check function 
@@ -12314,14 +12347,27 @@ int DoKemTlsEncapsualation(WOLFSSL* ssl, byte* input, word32* inOutIdx,
     XMEMCPY(ct,input+*inOutIdx,ctSz);
     (*inOutIdx)+=ctSz;
 
-    if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ssl->arrays->authHandshakeSecret,
-									ct,ctSz)) != 0) {
-        WOLFSSL_ERROR(ret);
-        goto err;
+    if(ssl->options.side == WOLFSSL_SERVER_END){
+        if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ssl->arrays->authHandshakeSecret,
+                                        ct,ctSz)) != 0) {
+            WOLFSSL_ERROR(ret);
+            goto err;
+        }
+    }
+
+    if(ssl->options.side == WOLFSSL_CLIENT_END){
+        if((ret=wc_MlKemKey_Decapsulate(ssl->hsKey,ssl->arrays->shared_secret_client,
+                                        ct,ctSz)) != 0) {
+            WOLFSSL_ERROR(ret);
+            goto err;
+        }
     }
 
     if (ssl->options.side == WOLFSSL_SERVER_END)
         ssl->options.clientState = CLIENT_KEM_CIPHERTEXT_COMPLETE;
+
+    if (ssl->options.side == WOLFSSL_CLIENT_END)
+        ssl->options.serverState = SERVER_KEM_CIPHERTEXT_COMPLETE;
 
     WOLFSSL_LEAVE("DoKemTlsEncapsualation", ret);
     WOLFSSL_END(WC_FUNC_KEM_ENCAPSULATION_DO);
@@ -13443,6 +13489,11 @@ int DoKemFinished(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
     }
 
     if (ssl->options.side == WOLFSSL_SERVER_END) {
+        if ((ret = DeriveMasterSecret(ssl)) != 0)
+            return ret;
+
+        ForceZero(ssl->arrays->authHandshakeSecret, SECRET_LEN);
+
         /* All the handshake messages have been received to calculate
          *
          * client and server finished keys.
@@ -14013,18 +14064,6 @@ static int SendKemTls13Finished(WOLFSSL* ssl)
     ssl->options.buildingMsg = 1;
 
     if(ssl->options.side == WOLFSSL_CLIENT_END) {
-        if ((ret = DeriveAuthHandshakeSecret(ssl)) != 0)
-            return ret;
-
-        ForceZero(ssl->arrays->preMasterSecret, ssl->arrays->preMasterSz);
-
-        if ((ret = DeriveTls13Keys(ssl, auth_handshake_key,
-                                   ENCRYPT_AND_DECRYPT_SIDE, 1)) != 0)
-            return ret;
-
-        if ((ret = SetKeysSide(ssl, ENCRYPT_AND_DECRYPT_SIDE)) != 0)
-            return ret;
-        
         if ((ret = DeriveMasterSecret(ssl)) != 0)
             return ret;
 
@@ -15025,7 +15064,7 @@ static int SanityCheckTls13MsgReceived(WOLFSSL* ssl, byte type)
             /* Check state. */
             /* On Server, valid after ClientHello received and ServerFinished
              * sent. */
-            if (ssl->options.side == WOLFSSL_SERVER_END &&
+            if (!ssl->isKemHandshake && ssl->options.side == WOLFSSL_SERVER_END &&
                 ssl->options.clientState != CLIENT_HELLO_COMPLETE &&
                 ssl->options.serverState < SERVER_FINISHED_COMPLETE) {
                 WOLFSSL_MSG("Certificate received out of order - Server");
@@ -15305,8 +15344,9 @@ static int SanityCheckTls13MsgReceived(WOLFSSL* ssl, byte type)
                 /* Must have received a valid CertificateVerify if verifying
                  * peer and got a peer certificate.
                  */
-                if ((ssl->options.mutualAuth || ssl->options.verifyPeer) &&
-                    ssl->options.havePeerCert && !ssl->options.havePeerVerify) {
+                if (!ssl->isKemHandshake && 
+                        ((ssl->options.mutualAuth || ssl->options.verifyPeer) &&
+                    ssl->options.havePeerCert && !ssl->options.havePeerVerify)) {
                     WOLFSSL_MSG("Finished received out of order - "
                                 "Certificate message but no CertificateVerify");
                     WOLFSSL_ERROR_VERBOSE(OUT_OF_ORDER_E);
@@ -15981,11 +16021,6 @@ int DoTls13HandShakeMsgType(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 
                 if ((ret = SetKeysSide(ssl, ENCRYPT_AND_DECRYPT_SIDE)) !=0)
                     return ret;
-
-                if ((ret = DeriveMasterSecret(ssl)) != 0)
-                    return ret;
-
-                ForceZero(ssl->arrays->authHandshakeSecret, SECRET_LEN);
             }
 
             if (ssl->isKemHandshake && type == finished) {
@@ -16216,6 +16251,7 @@ WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
     }
 
     ssl->isKemHandshake = 1;
+    ForceZero(ssl->arrays->shared_secret_client, SECRET_LEN);
 
     switch (ssl->options.connectState) {
 
@@ -16297,23 +16333,9 @@ WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
             FALL_THROUGH;
 
         case FIRST_REPLY_FIRST:
-            ssl->error = SendKemTls13Finished(ssl);
-            if (ssl->error != 0) {
-                WOLFSSL_ERROR(ssl->error);
-                return WOLFSSL_FATAL_ERROR;
-            }
-            WOLFSSL_MSG("client finished");
-
-            ssl->options.connectState = FIRST_REPLY_SECOND;
-            WOLFSSL_MSG("connect state: FIRST_REPLY_SECOND");
-            FALL_THROUGH;
-
-        case FIRST_REPLY_SECOND:
             /* CLIENT: check peer authentication. */
-            WOLFSSL_MSG("server implicit auth completed");
         #ifndef NO_CERTS
             if (!ssl->options.resuming && ssl->options.sendVerify) {
-                // TODO move it somewhere above
                 TLS_PROBE_RESET(P_CERT_SEND);
                 ssl->error = SendTls13Certificate(ssl);
                 TLS_PROBE_END(P_CERT_SEND);
@@ -16326,11 +16348,38 @@ WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
             }
         #endif
 
+            ssl->options.connectState = FIRST_REPLY_SECOND;
+            WOLFSSL_MSG("connect state: FIRST_REPLY_SECOND");
+            FALL_THROUGH;
+
+        case FIRST_REPLY_SECOND:
+            if (ssl->options.sendVerify){
+                while (ssl->options.serverState <
+                        SERVER_KEM_CIPHERTEXT_COMPLETE) {
+                    if ((ssl->error = ProcessReply(ssl)) < 0) {
+                            WOLFSSL_ERROR(ssl->error);
+                            return WOLFSSL_FATAL_ERROR;
+                    }
+
+                }
+            }
+
             ssl->options.connectState = FIRST_REPLY_THIRD;
             WOLFSSL_MSG("connect state: FIRST_REPLY_THIRD");
             FALL_THROUGH;
 
         case FIRST_REPLY_THIRD:
+            ssl->error = SendKemTls13Finished(ssl);
+            if (ssl->error != 0) {
+                WOLFSSL_ERROR(ssl->error);
+                return WOLFSSL_FATAL_ERROR;
+            }
+            WOLFSSL_MSG("client finished");
+            ssl->options.connectState = FIRST_REPLY_FOURTH;
+            WOLFSSL_MSG("connect state: FIRST_REPLY_FOURTH");
+            FALL_THROUGH;
+
+        case FIRST_REPLY_FOURTH:
             while (ssl->options.serverState <
                     SERVER_FINISHED_COMPLETE) {
                 if ((ssl->error = ProcessReply(ssl)) < 0) {
@@ -16339,11 +16388,6 @@ WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
                 }
 
             }
-            ssl->options.connectState = FIRST_REPLY_FOURTH;
-            WOLFSSL_MSG("connect state: FIRST_REPLY_FOURTH");
-            FALL_THROUGH;
-
-        case FIRST_REPLY_FOURTH:
             ssl->options.connectState = FINISHED_DONE;
             WOLFSSL_MSG("connect state: FINISHED_DONE");
             FALL_THROUGH;
@@ -17628,6 +17672,7 @@ int wolfSSL_accept_kemTLS(WOLFSSL* ssl)
     }
 
     ssl->isKemHandshake = 1;
+    ForceZero(ssl->arrays->shared_secret_client, SECRET_LEN);
 
     switch (ssl->options.acceptState) {
 
@@ -17762,20 +17807,35 @@ int wolfSSL_accept_kemTLS(WOLFSSL* ssl)
             FALL_THROUGH;
 
         case TLS13_CERT_SENT :
+            {
             // weve got to wait for encapsulated secret
             // and then decapsualte it
-            while (ssl->options.clientState < CLIENT_KEM_CIPHERTEXT_COMPLETE) {
-                if ((ssl->error = ProcessReply(ssl)) < 0) {
+                byte state = ssl->options.verifyPeer ? CLIENT_CERT_COMPLETE : 
+                    CLIENT_KEM_CIPHERTEXT_COMPLETE;
+                while (ssl->options.clientState < state) {
+                    if ((ssl->error = ProcessReply(ssl)) < 0) {
+                        WOLFSSL_ERROR(ssl->error);
+                        return WOLFSSL_FATAL_ERROR;
+                    }
+                }
+            }
+            ssl->options.acceptState = TLS13_ACCEPT_CERT_DONE;
+            WOLFSSL_MSG("accept state ACCEPT_CERT_DONE");
+            FALL_THROUGH;
+
+        case TLS13_ACCEPT_CERT_DONE:
+            if (ssl->options.clientState == CLIENT_CERT_COMPLETE){
+                if ((ssl->error = SendKemTlsClientKemCiphertext(ssl)) != 0) {
                     WOLFSSL_ERROR(ssl->error);
                     return WOLFSSL_FATAL_ERROR;
                 }
             }
-
-            ssl->options.acceptState = TLS13_ACCEPT_KEM_ENCAPSULATION_DONE;
-            WOLFSSL_MSG("accept state ACCEPT_KEM_ENCAPSULATION_DONE");
+            
+            ssl->options.acceptState = TLS13_ACCEPT_FINISHED_SENT;
+            WOLFSSL_MSG("accept state ACCEPT_FINISHED_SENT");
             FALL_THROUGH;
 
-        case TLS13_ACCEPT_KEM_ENCAPSULATION_DONE:
+        case TLS13_ACCEPT_FINISHED_SENT:
             while (ssl->options.clientState < CLIENT_FINISHED_COMPLETE) {
                 if ((ssl->error = ProcessReply(ssl)) < 0) {
                     WOLFSSL_ERROR(ssl->error);
@@ -17783,22 +17843,15 @@ int wolfSSL_accept_kemTLS(WOLFSSL* ssl)
                 }
             }
 
-            
-            ssl->options.acceptState = TLS13_ACCEPT_FINISHED_SENT;
-            WOLFSSL_MSG("accept state ACCEPT_FINISHED_SENT");
-            FALL_THROUGH;
-
-        case TLS13_ACCEPT_FINISHED_SENT:
-            if ((ssl->error = SendKemTls13Finished(ssl)) != 0) {
-                WOLFSSL_ERROR(ssl->error);
-                return WOLFSSL_FATAL_ERROR;
-            }
-
             ssl->options.acceptState = TLS13_ACCEPT_FINISHED_DONE;
             WOLFSSL_MSG("accept state ACCEPT_FINISHED_DONE");
             FALL_THROUGH;
 
         case TLS13_ACCEPT_FINISHED_DONE :
+            if ((ssl->error = SendKemTls13Finished(ssl)) != 0) {
+                WOLFSSL_ERROR(ssl->error);
+                return WOLFSSL_FATAL_ERROR;
+            }
             /* SERVER: When not resuming and verifying peer but no certificate
              * received and not failing when not received then peer auth good.
              */
@@ -17807,10 +17860,10 @@ int wolfSSL_accept_kemTLS(WOLFSSL* ssl)
                 ssl->options.peerAuthGood = 1;
             }
             /* SERVER: check peer authentication. */
-            if (!ssl->options.peerAuthGood) {
-                WOLFSSL_MSG("Client authentication did not happen");
-                return WOLFSSL_FATAL_ERROR;
-            }
+            //if (!ssl->options.peerAuthGood) {
+            //    WOLFSSL_MSG("Client authentication did not happen");
+            //    return WOLFSSL_FATAL_ERROR;
+            //}
             ssl->options.acceptState = TLS13_TICKET_SENT;
             WOLFSSL_MSG("accept state TICKET_SENT");
             FALL_THROUGH;

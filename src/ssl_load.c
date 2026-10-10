@@ -2043,28 +2043,28 @@ static int ProcessBufferCertPublicKey(WOLFSSL_CTX* ctx, WOLFSSL* ssl,
     #if defined(WOLFSSL_HAVE_MLKEM)
         case ML_KEM_512k:
             keyType = mlkem_512_sa_algo;
-            keySz = WC_ML_KEM_512_PUBLIC_KEY_SIZE;
+            keySz = WC_ML_KEM_512_PRIVATE_KEY_SIZE;
             if (checkKeySz) {
                 ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
-                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PRIVATE_KEY_SIZE, keySz,
                     MLKEM_KEY_SIZE_E);
             }
             break;
         case ML_KEM_768k:
             keyType = mlkem_768_sa_algo;
-            keySz = WC_ML_KEM_768_PUBLIC_KEY_SIZE;
+            keySz = WC_ML_KEM_768_PRIVATE_KEY_SIZE;
             if (checkKeySz) {
                 ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
-                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PRIVATE_KEY_SIZE, keySz,
                     MLKEM_KEY_SIZE_E);
             }
             break;
         case ML_KEM_1024k:
             keyType = mlkem_1024_sa_algo;
-            keySz = WC_ML_KEM_1024_PUBLIC_KEY_SIZE;
+            keySz = WC_ML_KEM_1024_PRIVATE_KEY_SIZE;
             if (checkKeySz) {
                 ret = CHECK_KEY_SZ(ssl ? ssl->options.minMlKemKeySz :
-                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PUBLIC_KEY_SIZE, keySz,
+                    ctx->minMlKemKeySz, WC_ML_KEM_MAX_PRIVATE_KEY_SIZE, keySz,
                     MLKEM_KEY_SIZE_E);
             }
             break;
