@@ -2290,6 +2290,10 @@ WOLFSSL_LOCAL int DoFinished(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
 WOLFSSL_LOCAL int DoTls13Finished(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
                            word32 size, word32 totalSz, int sniff);
 #endif
+#ifdef WOLFSSL_AUTHKEM
+WOLFSSL_LOCAL int DoKemFinished(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
+                           word32 size, word32 totalSz, int sniff);
+#endif
 #ifdef WOLFSSL_API_PREFIX_MAP
     #define DoApplicationData wolfSSL_DoApplicationData
 #endif
@@ -5261,6 +5265,9 @@ enum AcceptStateTls13 {
     TLS13_SERVER_EXTENSIONS_SENT,
     TLS13_CERT_REQ_SENT,
     TLS13_CERT_SENT,
+#if defined(WOLFSSL_AUTHKEM)
+    TLS13_ACCEPT_KEM_ENCAPSULATION_DONE,
+#endif 
     TLS13_CERT_VERIFY_SENT,
     TLS13_ACCEPT_FINISHED_SENT,
     TLS13_PRE_TICKET_SENT,
@@ -5740,8 +5747,7 @@ typedef struct Arrays {
     word32          preMasterSz;        /* differs for DH, actual size */
 
 #if defined(WOLFSSL_AUTHKEM)
-    byte*           authHandshakeSecret;
-    word32          authHandshakeSZ;
+    byte           authHandshakeSecret[SECRET_LEN];
 #endif
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
     word32          psk_keySz;          /* actual size */
@@ -6518,6 +6524,9 @@ struct WOLFSSL {
 #ifdef WOLFSSL_TLS13
     byte            clientSecret[SECRET_LEN];
     byte            serverSecret[SECRET_LEN];
+#endif
+#ifdef WOLFSSL_AUTHKEM
+    byte            isKemHandshake; 
 #endif
     HS_Hashes*      hsHashes;
 #if defined(WOLFSSL_TLS13) && defined(HAVE_ECH)
