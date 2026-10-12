@@ -13492,6 +13492,7 @@ int DoKemFinished(WOLFSSL* ssl, const byte* input, word32* inOutIdx,
         if ((ret = DeriveMasterSecret(ssl)) != 0)
             return ret;
 
+        ForceZero(ssl->arrays->shared_secret_client, WC_ML_KEM_SS_SZ);
         ForceZero(ssl->arrays->authHandshakeSecret, SECRET_LEN);
 
         /* All the handshake messages have been received to calculate
@@ -14067,6 +14068,7 @@ static int SendKemTls13Finished(WOLFSSL* ssl)
         if ((ret = DeriveMasterSecret(ssl)) != 0)
             return ret;
 
+        ForceZero(ssl->arrays->shared_secret_client, WC_ML_KEM_SS_SZ);
         ForceZero(ssl->arrays->authHandshakeSecret, SECRET_LEN);
     }
 
@@ -16251,7 +16253,7 @@ WOLFSSL_API int wolfSSL_connect_kemTLS(WOLFSSL* ssl)
     }
 
     ssl->isKemHandshake = 1;
-    ForceZero(ssl->arrays->shared_secret_client, SECRET_LEN);
+    ForceZero(ssl->arrays->shared_secret_client, WC_ML_KEM_SS_SZ);
 
     switch (ssl->options.connectState) {
 
@@ -17672,7 +17674,7 @@ int wolfSSL_accept_kemTLS(WOLFSSL* ssl)
     }
 
     ssl->isKemHandshake = 1;
-    ForceZero(ssl->arrays->shared_secret_client, SECRET_LEN);
+    ForceZero(ssl->arrays->shared_secret_client, WC_ML_KEM_SS_SZ);
 
     switch (ssl->options.acceptState) {
 
