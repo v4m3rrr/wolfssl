@@ -6528,9 +6528,7 @@ struct WOLFSSL {
     byte            clientSecret[SECRET_LEN];
     byte            serverSecret[SECRET_LEN];
 #endif
-#ifdef WOLFSSL_AUTHKEM
     byte            isKemHandshake; 
-#endif
     HS_Hashes*      hsHashes;
 #if defined(WOLFSSL_TLS13) && defined(HAVE_ECH)
     HS_Hashes*      hsHashesEch;

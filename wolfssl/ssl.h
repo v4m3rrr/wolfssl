@@ -5024,6 +5024,10 @@ WOLFSSL_API int wolfSSL_CTX_UseSupportedCurve(WOLFSSL_CTX* ctx,
                                                            word16 name);
 #endif
 
+#ifdef WOLFSSL_AUTHKEM
+WOLFSSL_API int wolfSSL_UseKemHandshake(WOLFSSL* ssl, int enable);
+#endif
+
 #ifdef WOLFSSL_TLS13
 WOLFSSL_API int wolfSSL_UseKeyShare(WOLFSSL* ssl, word16 group);
 WOLFSSL_API int wolfSSL_NoKeyShares(WOLFSSL* ssl);

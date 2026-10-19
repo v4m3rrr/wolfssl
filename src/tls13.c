@@ -1383,7 +1383,7 @@ int DeriveMasterSecret(WOLFSSL* ssl)
             PRIVATE_KEY_UNLOCK();
             ret = Tls13_HKDF_Extract(ssl, ssl->arrays->masterSecret,
                                      key, ssl->specs.hash_size,
-                                     ssl->arrays->shared_secret_client, SECRET_LEN,
+                                     ssl->arrays->shared_secret_client, WC_ML_KEM_SS_SZ,
                                      mac2hash(ssl->specs.mac_algorithm));
             PRIVATE_KEY_LOCK();
         }
@@ -16456,6 +16456,11 @@ int wolfSSL_connect_TLSv13(WOLFSSL* ssl)
     int advanceState;
     int ret = 0;
 
+    if(ssl->isKemHandshake){
+        return wolfSSL_connect_kemTLS(ssl);
+    }
+
+
     WOLFSSL_ENTER("wolfSSL_connect_TLSv13");
 
 #ifdef HAVE_ERRNO_H
@@ -16909,6 +16914,20 @@ int wolfSSL_set_hrr_cookie_secret_secondary(WOLFSSL* ssl,
 }
 
 #endif /* defined(WOLFSSL_SEND_HRR_COOKIE) */
+
+#ifdef WOLFSSL_AUTHKEM
+int wolfSSL_UseKemHandshake(WOLFSSL* ssl, int enable)
+{
+    if (ssl == NULL)
+        return BAD_FUNC_ARG;
+
+    if(enable)
+        ssl->isKemHandshake = 1;
+
+    return WOLFSSL_SUCCESS;
+}
+
+#endif
 
 #ifdef HAVE_SUPPORTED_CURVES
 /* Create a key share entry from group.
@@ -17922,6 +17941,9 @@ int wolfSSL_accept_TLSv13(WOLFSSL* ssl)
     word16 havePSK = 0;
 #endif
     int ret = 0;
+
+    if(ssl->isKemHandshake)
+        return wolfSSL_accept_kemTLS(ssl);
 
     WOLFSSL_ENTER("wolfSSL_accept_TLSv13");
 
