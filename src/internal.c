@@ -158,6 +158,7 @@
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/dh.h>
 #include <wolfssl/wolfcrypt/hash.h>
+#include <wolfssl/tls_probe.h>
 #ifdef NO_INLINE
     #include <wolfssl/wolfcrypt/misc.h>
 #else
@@ -6612,6 +6613,7 @@ int Ed25519CheckPubKey(WOLFSSL* ssl)
 
         ret = wc_CertGetPubKey(ssl->buffers.certificate->buffer,
             ssl->buffers.certificate->length, &pubKey, &pubKeySz);
+
         if (ret == 0) {
             ret = wc_ed25519_import_public(pubKey, pubKeySz, key);
         }
@@ -11808,6 +11810,7 @@ static int EdDSA_Update(WOLFSSL* ssl, const byte* data, int sz)
 int HashRaw(WOLFSSL* ssl, const byte* data, int sz)
 {
     int ret = 0;
+    TLS_PROBE_START(BUCKET_TRANSCRIPT);
 #ifdef WOLFSSL_DEBUG_TLS
     byte digest[WC_MAX_DIGEST_SIZE];
 
@@ -11889,6 +11892,7 @@ int HashRaw(WOLFSSL* ssl, const byte* data, int sz)
             return ret;
     #endif
     }
+    TLS_PROBE_PAUSE(BUCKET_TRANSCRIPT);
 
     return ret;
 }
@@ -18164,6 +18168,7 @@ int ProcessPeerCerts(WOLFSSL* ssl, byte* input, word32* inOutIdx,
     int addToPendingCAs = 0;
 #endif
     WOLFSSL_ENTER("ProcessPeerCerts");
+    TLS_PROBE_START(BUCKET_AUTH_SRV_CHAIN);
 
 #if defined(WOLFSSL_ASYNC_CRYPT) || defined(WOLFSSL_NONBLOCK_OCSP)
     if (ssl->async == NULL) {
@@ -19348,8 +19353,12 @@ int ProcessPeerCerts(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 #endif
 
                 /* decode peer key */
+                TLS_PROBE_PAUSE(BUCKET_AUTH_SRV_CHAIN);
+                TLS_PROBE_START(BUCKET_PEER_KEY);
                 if (ProcessPeerCertDecodeKey(ssl, args, &ret))
                     goto exit_ppc;
+                TLS_PROBE_PAUSE(BUCKET_PEER_KEY);
+                TLS_PROBE_START(BUCKET_AUTH_SRV_CHAIN);
 
                 /* args->dCert free'd in function cleanup after callback */
             } /* if (count > 0) */
@@ -19427,6 +19436,7 @@ int ProcessPeerCerts(WOLFSSL* ssl, byte* input, word32* inOutIdx,
 
 exit_ppc:
 
+    TLS_PROBE_PAUSE(BUCKET_AUTH_SRV_CHAIN);
     WOLFSSL_LEAVE("ProcessPeerCerts", ret);
 
 

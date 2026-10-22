@@ -127,6 +127,7 @@
 #include <wolfssl/wolfcrypt/hash.h>
 #include <wolfssl/wolfcrypt/hmac.h>
 #include <wolfssl/wolfcrypt/kdf.h>
+#include <wolfssl/tls_probe.h>
 #ifdef NO_INLINE
     #include <wolfssl/wolfcrypt/misc.h>
 #else
@@ -8469,7 +8470,7 @@ static int TLSX_KeyShare_GenX25519Key(WOLFSSL *ssl, KeyShareEntry* kse)
     int ret = 0;
 #ifdef HAVE_CURVE25519
     curve25519_key* key = (curve25519_key*)kse->key;
-
+    
     if (kse->key == NULL) {
         /* Allocate a Curve25519 key to hold private key. */
         kse->key = (curve25519_key*)XMALLOC(sizeof(curve25519_key), ssl->heap,
@@ -9366,6 +9367,8 @@ static int TLSX_KeyShare_GenPqcHybridKeyClient(WOLFSSL *ssl, KeyShareEntry* kse)
 int TLSX_KeyShare_GenKey(WOLFSSL *ssl, KeyShareEntry *kse)
 {
     int ret;
+    TLS_PROBE_START(BUCKET_KEX);
+
     /* Named FFDHE groups have a bit set to identify them. */
     if (WOLFSSL_NAMED_GROUP_IS_FFDHE(kse->group))
         ret = TLSX_KeyShare_GenDhKey(ssl, kse);
@@ -9385,6 +9388,7 @@ int TLSX_KeyShare_GenKey(WOLFSSL *ssl, KeyShareEntry *kse)
 #ifdef WOLFSSL_ASYNC_CRYPT
     kse->lastRet = ret;
 #endif
+    TLS_PROBE_PAUSE(BUCKET_KEX);
     return ret;
 }
 
@@ -10630,6 +10634,7 @@ static int TLSX_KeyShare_ProcessPqcHybridClient(WOLFSSL* ssl,
 static int TLSX_KeyShare_Process(WOLFSSL* ssl, KeyShareEntry* keyShareEntry)
 {
     int ret;
+    TLS_PROBE_START(BUCKET_KEX);
 
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
     keyShareEntry->session = ssl->session->namedGroup;
@@ -10668,6 +10673,7 @@ static int TLSX_KeyShare_Process(WOLFSSL* ssl, KeyShareEntry* keyShareEntry)
     keyShareEntry->lastRet = ret;
 #endif
 
+    TLS_PROBE_PAUSE(BUCKET_KEX);
     return ret;
 }
 
